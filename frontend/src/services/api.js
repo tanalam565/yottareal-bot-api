@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:8000/api';
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
 const API_KEY = process.env.REACT_APP_CHATBOT_API_KEY || '';
 
 const api = axios.create({
@@ -11,10 +11,10 @@ const api = axios.create({
   },
 });
 
-export const sendMessage = async (message, sessionId = null) => {
+export const sendMessage = async (messageText, sessionId = null) => {
   try {
     const response = await api.post('/chat', {
-      message,
+      message: messageText,
       session_id: sessionId,
     });
     return response.data;

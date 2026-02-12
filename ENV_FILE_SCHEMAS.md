@@ -1,21 +1,33 @@
 ------------------------------------------------------Backend .env--------------------------------------------
 
 # Azure Blob Storage
-AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=your-storage-account;AccountKey=your-key;EndpointSuffix=core.windows.net
-AZURE_STORAGE_CONTAINER_NAME=property-documents
+AZURE_STORAGE_CONNECTION_STRING=
+AZURE_STORAGE_CONTAINER_NAME=
 
 # Azure AI Search
-AZURE_SEARCH_ENDPOINT=https://yottaaisearch.search.windows.net
-AZURE_SEARCH_KEY=your-search-key
-AZURE_SEARCH_INDEX_NAME=property-docs
-AZURE_SEARCH_DATASOURCE_NAME=property-blob-datasource
-AZURE_SEARCH_INDEXER_NAME=property-blob-indexer
+AZURE_SEARCH_ENDPOINT=
+AZURE_SEARCH_KEY=
+AZURE_SEARCH_INDEX_NAME=
+
+# AZURE_SEARCH_INDEX_NAME=yotta-property-docs
+AZURE_SEARCH_DATASOURCE_NAME=
+AZURE_SEARCH_INDEXER_NAME
 
 # Azure OpenAI
-AZURE_OPENAI_API_KEY=your-openai-api-key
-AZURE_OPENAI_ENDPOINT=https://your-openai-endpoint.openai.azure.com/
-AZURE_OPENAI_DEPLOYMENT_NAME=yotta-gpt-4o
-AZURE_OPENAI_API_VERSION=2024-02-15-preview
+AZURE_OPENAI_API_KEY=
+AZURE_OPENAI_ENDPOINT=
+AZURE_OPENAI_DEPLOYMENT_NAME=
+AZURE_OPENAI_API_VERSION=
+
+AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=
+AZURE_DOCUMENT_INTELLIGENCE_KEY=
+
+# Azure OpenAI Embeddings
+AZURE_OPENAI_EMBEDDING_ENDPOINT=
+AZURE_OPENAI_EMBEDDING_KEY=
+AZURE_OPENAI_EMBEDDING_
+AZURE_OPENAI_EMBEDDING_MODEL=
+AZURE_OPENAI_EMBEDDING_API_VERSION=
 
 # API Authentication
 CHATBOT_API_KEY=your-secret-api-key-here

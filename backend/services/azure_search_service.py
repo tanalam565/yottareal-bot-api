@@ -1,299 +1,270 @@
 from azure.search.documents import SearchClient
-from azure.search.documents.indexes import SearchIndexClient
-from azure.search.documents.indexes.models import (
-    SearchIndex,
-    SimpleField,
-    SearchableField,
-    SearchFieldDataType,
-    SearchIndexer,
-    SearchIndexerDataContainer,
-    SearchIndexerDataSourceConnection,
-    SearchIndexerSkillset,
-    InputFieldMappingEntry,
-    OutputFieldMappingEntry,
-    OcrSkill,
-    MergeSkill,
-    SplitSkill,
-    TextSplitMode,
-    FieldMapping,
-)
+from azure.search.documents.indexes import SearchIndexerClient
+from azure.search.documents.models import VectorizedQuery
 from azure.core.credentials import AzureKeyCredential
+from services.blob_service import BlobService
 from typing import List, Dict
+import urllib.parse
 import config
+from services.embedding_service import EmbeddingService
 
 class AzureSearchService:
     def __init__(self):
         self.endpoint = config.AZURE_SEARCH_ENDPOINT
         self.key = config.AZURE_SEARCH_KEY
         self.index_name = config.AZURE_SEARCH_INDEX_NAME
-        self.datasource_name = config.AZURE_SEARCH_DATASOURCE_NAME
-        self.indexer_name = config.AZURE_SEARCH_INDEXER_NAME
-        self.skillset_name = "property-ocr-skillset"
+        self.indexer_name = "azureblob-indexer-yotta"
         
         self.credential = AzureKeyCredential(self.key)
+        
         self.search_client = SearchClient(
             endpoint=self.endpoint,
             index_name=self.index_name,
             credential=self.credential
         )
-        self.index_client = SearchIndexClient(
+        
+        self.indexer_client = SearchIndexerClient(
             endpoint=self.endpoint,
             credential=self.credential
         )
         
-        self._setup_blob_indexer()
-    
-    def _setup_blob_indexer(self):
-        """Setup index, data source, skillset, and indexer for blob storage with OCR"""
+        self.embedding_service = EmbeddingService()
+        self.blob_service = BlobService()
+        
+        print(f"✓ Connected to index: {self.index_name} (Hybrid Search enabled)")
+        print(f"✓ Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
+
+    def _extract_filename(self, result_dict: dict) -> str:
+        """Extract filename from search result - handle parent docs and chunks"""
+        
+        # Try title first
+        title = result_dict.get("title")
+        if title and title.strip():
+            return title
+        
+        # Try filepath
+        filepath = result_dict.get("filepath")
+        if filepath and filepath.strip():
+            return filepath.split("/")[-1] if "/" in filepath else filepath
+        
+        # Try parent_id
+        parent_id = result_dict.get("parent_id")
+        if parent_id and parent_id.strip():
+            try:
+                parsed = urllib.parse.urlparse(parent_id)
+                path = parsed.path
+                if '/' in path:
+                    filename = path.split('/')[-1]
+                    filename = urllib.parse.unquote(filename)
+                    if filename:
+                        return filename
+            except:
+                pass
+        
+        return "Unknown Document"
+
+    async def search(self, query: str, top: int = config.MAX_SEARCH_RESULTS) -> List[Dict]:
+        """
+        Perform hybrid search (keyword + vector) on indexed documents
+        with per-document chunk limiting to avoid one document dominating results
+        """
         try:
-            # Create or update index
-            self._create_index()
+            print(f"\n{'='*70}")
+            print(f"🔍 Hybrid search for: '{query}'")
+            print(f"📊 Target results: {top}")
+            print(f"📄 Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
+            print(f"{'='*70}")
             
-            # Create or update data source
-            self._create_datasource()
+            # Generate query embedding
+            query_embedding = self.embedding_service.generate_embedding(query)
             
-            # Create or update skillset with OCR
-            self._create_skillset()
-            
-            # Create or update indexer
-            self._create_indexer()
-            
-            print("Blob indexer with OCR skillset setup complete")
-        except Exception as e:
-            print(f"Error setting up blob indexer: {e}")
-    
-    def _create_index(self):
-        """Create search index with fields for OCR content"""
-        try:
-            fields = [
-                SimpleField(
-                    name="metadata_storage_path",
-                    type=SearchFieldDataType.String,
-                    key=True,
-                    filterable=True
-                ),
-                SearchableField(
-                    name="content",
-                    type=SearchFieldDataType.String,
-                    analyzer_name="en.microsoft"
-                ),
-                SearchableField(
-                    name="merged_content",
-                    type=SearchFieldDataType.String,
-                    analyzer_name="en.microsoft"
-                ),
-                SearchableField(
-                    name="text",
-                    type=SearchFieldDataType.Collection(SearchFieldDataType.String),
-                    analyzer_name="en.microsoft"
-                ),
-                SearchableField(
-                    name="layoutText",
-                    type=SearchFieldDataType.Collection(SearchFieldDataType.String),
-                    analyzer_name="en.microsoft"
-                ),
-                SearchableField(
-                    name="metadata_storage_name",
-                    type=SearchFieldDataType.String,
-                    filterable=True,
-                    sortable=True
-                ),
-                SimpleField(
-                    name="metadata_storage_size",
-                    type=SearchFieldDataType.Int64,
-                    filterable=True,
-                    sortable=True
-                ),
-                SimpleField(
-                    name="metadata_storage_last_modified",
-                    type=SearchFieldDataType.DateTimeOffset,
-                    filterable=True,
-                    sortable=True
-                ),
-            ]
-            
-            index = SearchIndex(name=self.index_name, fields=fields)
-            self.index_client.create_or_update_index(index)
-            print(f"Index '{self.index_name}' created/updated with OCR fields")
-        except Exception as e:
-            print(f"Error creating index: {e}")
-    
-    def _create_datasource(self):
-        """Create blob storage data source"""
-        try:
-            container = SearchIndexerDataContainer(
-                name=config.AZURE_STORAGE_CONTAINER_NAME
+            # Create vector query
+            vector_query = VectorizedQuery(
+                vector=query_embedding,
+                k_nearest_neighbors=top * 8,  # Get more initial results for filtering
+                fields="content_vector"
             )
             
-            data_source = SearchIndexerDataSourceConnection(
-                name=self.datasource_name,
-                type="azureblob",
-                connection_string=config.AZURE_STORAGE_CONNECTION_STRING,
-                container=container
+            # Perform hybrid search - get more results than needed
+            results = self.search_client.search(
+                search_text=query,
+                vector_queries=[vector_query],
+                top=top * 5,  # Fetch 5x more results to account for per-doc limiting
+                include_total_count=True
             )
             
-            self.index_client.create_or_update_data_source_connection(data_source)
-            print(f"Data source '{self.datasource_name}' created/updated")
-        except Exception as e:
-            print(f"Error creating data source: {e}")
-    
-    def _create_skillset(self):
-        """Create skillset with OCR for processing images and scanned PDFs"""
-        try:
-            # OCR Skill - Extracts text from images
-            ocr_skill = OcrSkill(
-                name="ocr-skill",
-                description="Extract text from images using OCR",
-                context="/document/normalized_images/*",
-                inputs=[
-                    InputFieldMappingEntry(name="image", source="/document/normalized_images/*")
-                ],
-                outputs=[
-                    OutputFieldMappingEntry(name="text", target_name="text")
-                ],
-                default_language_code="en"
-            )
+            # Group chunks by parent_id and limit per document
+            parent_chunks = {}  # {parent_id: [chunks]}
+            processed_results = []
             
-            # Merge Skill - Combines OCR text with document text
-            merge_skill = MergeSkill(
-                name="merge-skill",
-                description="Merge extracted text with document content",
-                context="/document",
-                inputs=[
-                    InputFieldMappingEntry(name="text", source="/document/content"),
-                    InputFieldMappingEntry(name="itemsToInsert", source="/document/normalized_images/*/text")
-                ],
-                outputs=[
-                    OutputFieldMappingEntry(name="mergedText", target_name="merged_content")
-                ]
-            )
+            print(f"\n📥 Processing search results with per-document limiting...")
             
-            # Split Skill - Chunks large documents
-            split_skill = SplitSkill(
-                name="split-skill",
-                description="Split documents into chunks",
-                context="/document",
-                text_split_mode=TextSplitMode.PAGES,
-                maximum_page_length=4000,
-                page_overlap_length=500,
-                inputs=[
-                    InputFieldMappingEntry(name="text", source="/document/merged_content")
-                ],
-                outputs=[
-                    OutputFieldMappingEntry(name="textItems", target_name="pages")
-                ]
-            )
-            
-            skillset = SearchIndexerSkillset(
-                name=self.skillset_name,
-                description="Skillset for OCR and document processing",
-                skills=[ocr_skill, merge_skill, split_skill]
-            )
-            
-            self.index_client.create_or_update_skillset(skillset)
-            print(f"Skillset '{self.skillset_name}' created/updated with OCR")
-        except Exception as e:
-            print(f"Error creating skillset: {e}")
-    
-    def _create_indexer(self):
-        """Create indexer to automatically index blob storage with OCR skillset"""
-        try:
-            indexer = SearchIndexer(
-                name=self.indexer_name,
-                data_source_name=self.datasource_name,
-                target_index_name=self.index_name,
-                skillset_name=self.skillset_name,
-                parameters={
-                    "configuration": {
-                        "dataToExtract": "contentAndMetadata",
-                        "imageAction": "generateNormalizedImages"  # Enable image processing
+            for result in results:
+                result_dict = dict(result)
+                
+                # Get parent_id to group chunks
+                parent_id = result_dict.get("parent_id")
+                if not parent_id:
+                    # No parent_id means it's a standalone document
+                    parent_id = result_dict.get("chunk_id", f"standalone_{len(parent_chunks)}")
+                
+                # Initialize parent tracking
+                if parent_id not in parent_chunks:
+                    parent_chunks[parent_id] = {
+                        'count': 0,
+                        'chunks': [],
+                        'filename': self._extract_filename(result_dict)
                     }
-                },
-                field_mappings=[
-                    FieldMapping(
-                        source_field_name="metadata_storage_path",
-                        target_field_name="metadata_storage_path"
-                    )
-                ],
-                output_field_mappings=[
-                    FieldMapping(
-                        source_field_name="/document/merged_content",
-                        target_field_name="merged_content"
-                    ),
-                    FieldMapping(
-                        source_field_name="/document/normalized_images/*/text",
-                        target_field_name="text"
-                    )
-                ]
+                
+                # Check if we've hit the per-document limit
+                if parent_chunks[parent_id]['count'] >= config.MAX_CHUNKS_PER_DOCUMENT:
+                    continue  # Skip this chunk, already have enough from this document
+                
+                # Get content
+                content = result_dict.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(str(item) for item in content)
+                
+                if not content:
+                    continue
+                
+                filename = parent_chunks[parent_id]['filename']
+                
+                # Generate download URL from metadata_storage_name
+                blob_name = result_dict.get("metadata_storage_name", "")
+                download_url = None
+                if blob_name:
+                    try:
+                        download_url = self.blob_service.generate_download_url(blob_name)
+                    except Exception as e:
+                        print(f"   ⚠️  Error generating download URL for {blob_name}: {e}")
+                
+                # Add to parent's chunks
+                chunk_data = {
+                    "content": str(content)[:5000],
+                    "filename": filename,
+                    "source_type": "company",
+                    "download_url": download_url,
+                    "parent_id": parent_id,
+                    "chunk_number": result_dict.get("chunk_number"),
+                    "page_number": result_dict.get("page_number", 1)  # ← ACTUAL PAGE NUMBER FROM PDF
+                }
+                
+                parent_chunks[parent_id]['chunks'].append(chunk_data)
+                parent_chunks[parent_id]['count'] += 1
+                processed_results.append(chunk_data)
+                
+                # Stop if we have enough results overall
+                if len(processed_results) >= top:
+                    break
+            
+            # Log statistics
+            print(f"\n📊 Retrieval Statistics:")
+            print(f"   ✓ Total unique documents: {len(parent_chunks)}")
+            print(f"   ✓ Total chunks retrieved: {len(processed_results)}")
+            
+            # Show per-document breakdown
+            print(f"\n📄 Chunks per document:")
+            for parent_id, data in parent_chunks.items():
+                filename = data['filename']
+                count = data['count']
+                status = "⚠️ LIMITED" if count >= config.MAX_CHUNKS_PER_DOCUMENT else "✓"
+                print(f"   {status} {filename}: {count} chunks")
+            
+            print(f"{'='*70}\n")
+            
+            return processed_results[:top]
+            
+        except Exception as e:
+            print(f"❌ Hybrid search error: {e}")
+            import traceback
+            traceback.print_exc()
+            return await self._fallback_keyword_search(query, top)
+
+    async def _fallback_keyword_search(self, query: str, top: int) -> List[Dict]:
+        """Fallback to keyword-only search if hybrid search fails"""
+        try:
+            print(f"\n⚠️  Falling back to keyword-only search")
+            
+            results = self.search_client.search(
+                search_text=query,
+                top=top * 3,
+                include_total_count=True
             )
             
-            self.index_client.create_or_update_indexer(indexer)
-            print(f"Indexer '{self.indexer_name}' created/updated with OCR skillset")
+            # Apply same per-document limiting
+            parent_chunks = {}
+            search_results = []
+            
+            for result in results:
+                result_dict = dict(result)
+                
+                parent_id = result_dict.get("parent_id")
+                if not parent_id:
+                    parent_id = result_dict.get("chunk_id", f"standalone_{len(parent_chunks)}")
+                
+                if parent_id not in parent_chunks:
+                    parent_chunks[parent_id] = 0
+                
+                if parent_chunks[parent_id] >= config.MAX_CHUNKS_PER_DOCUMENT:
+                    continue
+                
+                content = result_dict.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(str(item) for item in content)
+                
+                filename = self._extract_filename(result_dict)
+                
+                if filename == "Unknown Document":
+                    continue
+                
+                blob_name = result_dict.get("metadata_storage_name", "")
+                download_url = None
+                if blob_name:
+                    download_url = self.blob_service.generate_download_url(blob_name)
+                
+                if content:
+                    search_results.append({
+                        "content": str(content)[:5000],
+                        "filename": filename,
+                        "source_type": "company",
+                        "download_url": download_url,
+                        "page_number": result_dict.get("page_number", 1)  # ← ACTUAL PAGE NUMBER
+                    })
+                    parent_chunks[parent_id] += 1
+                
+                if len(search_results) >= top:
+                    break
+            
+            print(f"✓ Keyword search returned {len(search_results)} results from {len(parent_chunks)} documents")
+            return search_results
+            
         except Exception as e:
-            print(f"Error creating indexer: {e}")
-    
-    async def run_indexer(self):
-        """Manually trigger indexer to process new files"""
-        try:
-            self.index_client.run_indexer(self.indexer_name)
-            print(f"Indexer '{self.indexer_name}' started")
-            return True
-        except Exception as e:
-            print(f"Error running indexer: {e}")
-            return False
+            print(f"❌ Fallback search error: {e}")
+            return []
     
     async def get_indexer_status(self):
-        """Get indexer execution status"""
+        """Get status of the Azure Search indexer"""
         try:
-            status = self.index_client.get_indexer_status(self.indexer_name)
+            status = self.indexer_client.get_indexer_status(self.indexer_name)
             return {
+                "name": status.name,
                 "status": status.status,
-                "last_result": status.last_result.status if status.last_result else None,
-                "execution_history": [
-                    {
-                        "status": exec.status,
-                        "error_message": exec.error_message,
-                        "start_time": exec.start_time,
-                        "end_time": exec.end_time
-                    }
-                    for exec in (status.execution_history[:5] if status.execution_history else [])
-                ]
+                "last_result": {
+                    "status": status.last_result.status if status.last_result else None,
+                    "error_message": status.last_result.error_message if status.last_result else None
+                }
             }
         except Exception as e:
             print(f"Error getting indexer status: {e}")
-            return None
+            return {"error": str(e)}
     
-    async def search(self, query: str, top: int = config.MAX_SEARCH_RESULTS) -> List[Dict]:
-        """Search indexed documents including OCR content"""
+    async def run_indexer(self):
+        """Manually trigger the indexer to process new documents"""
         try:
-            results = self.search_client.search(
-                search_text=query,
-                top=top,
-                select=["merged_content", "content", "metadata_storage_name", "metadata_storage_path"]
-            )
-            
-            return [
-                {
-                    "content": result.get("merged_content") or result.get("content", ""),
-                    "filename": result.get("metadata_storage_name", ""),
-                    "path": result.get("metadata_storage_path", ""),
-                    "score": result.get("@search.score", 0)
-                }
-                for result in results
-            ]
-        except Exception as e:
-            print(f"Search error: {e}")
-            return []
-    
-    async def delete_all_documents(self):
-        """Delete all documents from index"""
-        try:
-            results = self.search_client.search(search_text="*", select=["metadata_storage_path"])
-            docs_to_delete = [{"metadata_storage_path": result["metadata_storage_path"]} for result in results]
-            
-            if docs_to_delete:
-                self.search_client.delete_documents(documents=docs_to_delete)
+            self.indexer_client.run_indexer(self.indexer_name)
+            print(f"✓ Indexer '{self.indexer_name}' triggered successfully")
             return True
         except Exception as e:
-            print(f"Delete error: {e}")
+            print(f"❌ Error running indexer: {e}")
             return False
