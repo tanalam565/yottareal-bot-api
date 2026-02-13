@@ -58,8 +58,8 @@ CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
 
 # Application Settings
 MAX_SEARCH_RESULTS = 15
-CHUNK_SIZE = 2000
-CHUNK_OVERLAP = 500
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
 
 # Retruval Settings: Maximum chunks to retrieve from a single parent document
 MAX_CHUNKS_PER_DOCUMENT = 7
