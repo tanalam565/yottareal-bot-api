@@ -7,10 +7,28 @@ from typing import List, Dict
 import urllib.parse
 import config
 from services.embedding_service import EmbeddingService
+import logging
 
 class AzureSearchService:
+    """
+    Service class for interacting with Azure Cognitive Search.
+
+    This class provides methods to perform hybrid searches (keyword + vector) on indexed documents,
+    manage search indexers, and handle document retrieval with per-document chunk limiting.
+    It integrates with Azure Blob Storage for document downloads and uses embedding services
+    for vector queries.
+    """
+
     def __init__(self):
-        self.endpoint = config.AZURE_SEARCH_ENDPOINT
+        """
+        Initialize the Azure Search Service.
+
+        Sets up the Azure Search clients (SearchClient and SearchIndexerClient),
+        embedding service, and blob service using configuration values.
+        Logs connection status and configuration details.
+        """
+        self.logger = logging.getLogger(__name__)
+        self.endpoint = config.AZURE_SEARCH_ENDPOINT    
         self.key = config.AZURE_SEARCH_KEY
         self.index_name = config.AZURE_SEARCH_INDEX_NAME
         self.indexer_name = "azureblob-indexer-yotta"
@@ -31,11 +49,24 @@ class AzureSearchService:
         self.embedding_service = EmbeddingService()
         self.blob_service = BlobService()
         
-        print(f"✓ Connected to index: {self.index_name} (Hybrid Search enabled)")
-        print(f"✓ Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
+        self.logger.info("Connected to index: %s (Hybrid Search enabled)", self.index_name)
+        self.logger.info("Max chunks per document: %s", config.MAX_CHUNKS_PER_DOCUMENT)
 
     def _extract_filename(self, result_dict: dict) -> str:
-        """Extract filename from search result - handle parent docs and chunks"""
+        """
+        Extract the filename from a search result dictionary.
+
+        Attempts to extract the filename from various fields in the result:
+        - 'title' field
+        - 'filepath' field (takes the last part after '/')
+        - 'parent_id' field (parses URL and extracts filename)
+
+        Args:
+            result_dict (dict): The search result dictionary.
+
+        Returns:
+            str: The extracted filename, or "Unknown Document" if not found.
+        """
         
         # Try title first
         title = result_dict.get("title")
@@ -58,22 +89,30 @@ class AzureSearchService:
                     filename = urllib.parse.unquote(filename)
                     if filename:
                         return filename
-            except:
-                pass
+            except Exception as e:
+                self.logger.warning("Error parsing parent_id: %s", e)
         
         return "Unknown Document"
 
     async def search(self, query: str, top: int = config.MAX_SEARCH_RESULTS) -> List[Dict]:
         """
-        Perform hybrid search (keyword + vector) on indexed documents
-        with per-document chunk limiting to avoid one document dominating results
+        Perform hybrid search (keyword + vector) on indexed documents.
+
+        Executes a hybrid search combining keyword and vector queries, with per-document
+        chunk limiting to prevent one document from dominating the results. Generates
+        embeddings for the query, fetches results, groups by parent document, and limits
+        chunks per document. Falls back to keyword-only search if hybrid fails.
+
+        Args:
+            query (str): The search query string.
+            top (int, optional): The number of top results to return. Defaults to config.MAX_SEARCH_RESULTS.
+
+        Returns:
+            List[Dict]: A list of dictionaries containing search results with keys like
+                'content', 'filename', 'source_type', 'download_url', 'parent_id', etc.
         """
         try:
-            print(f"\n{'='*70}")
-            print(f"🔍 Hybrid search for: '{query}'")
-            print(f"📊 Target results: {top}")
-            print(f"📄 Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
-            print(f"{'='*70}")
+            self.logger.info("Starting hybrid search for query: '%s', target results: %d, max chunks per document: %d", query, top, config.MAX_CHUNKS_PER_DOCUMENT)
             
             # Generate query embedding
             query_embedding = self.embedding_service.generate_embedding(query)
@@ -97,7 +136,7 @@ class AzureSearchService:
             parent_chunks = {}  # {parent_id: [chunks]}
             processed_results = []
             
-            print(f"\n📥 Processing search results with per-document limiting...")
+            self.logger.info("Processing search results with per-document limiting")
             
             for result in results:
                 result_dict = dict(result)
@@ -137,7 +176,7 @@ class AzureSearchService:
                     try:
                         download_url = self.blob_service.generate_download_url(blob_name)
                     except Exception as e:
-                        print(f"   ⚠️  Error generating download URL for {blob_name}: {e}")
+                        self.logger.warning("Error generating download URL for %s: %s", blob_name, e)
                 
                 # Add to parent's chunks
                 chunk_data = {
@@ -159,32 +198,37 @@ class AzureSearchService:
                     break
             
             # Log statistics
-            print(f"\n📊 Retrieval Statistics:")
-            print(f"   ✓ Total unique documents: {len(parent_chunks)}")
-            print(f"   ✓ Total chunks retrieved: {len(processed_results)}")
+            self.logger.info("Retrieval Statistics: Total unique documents: %d, Total chunks retrieved: %d", len(parent_chunks), len(processed_results))
             
             # Show per-document breakdown
-            print(f"\n📄 Chunks per document:")
             for parent_id, data in parent_chunks.items():
                 filename = data['filename']
                 count = data['count']
-                status = "⚠️ LIMITED" if count >= config.MAX_CHUNKS_PER_DOCUMENT else "✓"
-                print(f"   {status} {filename}: {count} chunks")
-            
-            print(f"{'='*70}\n")
+                status = "LIMITED" if count >= config.MAX_CHUNKS_PER_DOCUMENT else "OK"
+                self.logger.debug("Document %s: %d chunks (%s)", filename, count, status)
             
             return processed_results[:top]
             
         except Exception as e:
-            print(f"❌ Hybrid search error: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.exception("Hybrid search error: %s", e)
             return await self._fallback_keyword_search(query, top)
 
     async def _fallback_keyword_search(self, query: str, top: int) -> List[Dict]:
-        """Fallback to keyword-only search if hybrid search fails"""
+        """
+        Fallback to keyword-only search if hybrid search fails.
+
+        Performs a keyword-based search without vector queries, applying the same
+        per-document chunk limiting logic.
+
+        Args:
+            query (str): The search query string.
+            top (int): The number of top results to return.
+
+        Returns:
+            List[Dict]: A list of dictionaries containing search results.
+        """
         try:
-            print(f"\n⚠️  Falling back to keyword-only search")
+            self.logger.warning("Falling back to keyword-only search")
             
             results = self.search_client.search(
                 search_text=query,
@@ -236,15 +280,23 @@ class AzureSearchService:
                 if len(search_results) >= top:
                     break
             
-            print(f"✓ Keyword search returned {len(search_results)} results from {len(parent_chunks)} documents")
+            self.logger.info("Keyword search returned %d results from %d documents", len(search_results), len(parent_chunks))
             return search_results
             
         except Exception as e:
-            print(f"❌ Fallback search error: {e}")
+            self.logger.error("Fallback search error: %s", e)
             return []
     
     async def get_indexer_status(self):
-        """Get status of the Azure Search indexer"""
+        """
+        Get the status of the Azure Search indexer.
+
+        Retrieves the current status of the configured indexer, including name,
+        status, and last result details.
+
+        Returns:
+            dict: A dictionary containing indexer status information, or an error dict if failed.
+        """
         try:
             status = self.indexer_client.get_indexer_status(self.indexer_name)
             return {
@@ -256,15 +308,22 @@ class AzureSearchService:
                 }
             }
         except Exception as e:
-            print(f"Error getting indexer status: {e}")
+            self.logger.error("Error getting indexer status: %s", e)
             return {"error": str(e)}
     
     async def run_indexer(self):
-        """Manually trigger the indexer to process new documents"""
+        """
+        Manually trigger the indexer to process new documents.
+
+        Runs the configured indexer to index any new or updated documents in the data source.
+
+        Returns:
+            bool: True if the indexer was triggered successfully, False otherwise.
+        """
         try:
             self.indexer_client.run_indexer(self.indexer_name)
-            print(f"✓ Indexer '{self.indexer_name}' triggered successfully")
+            self.logger.info("Indexer '%s' triggered successfully", self.indexer_name)
             return True
         except Exception as e:
-            print(f"❌ Error running indexer: {e}")
+            self.logger.error("Error running indexer: %s", e)
             return False

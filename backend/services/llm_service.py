@@ -5,9 +5,22 @@ from openai import AzureOpenAI
 import uuid
 import re
 import config
+import logging
 
 class LLMService:
+    """
+    Service class for generating AI responses using Azure OpenAI.
+
+    This class handles conversation management, context building from documents,
+    and response generation with proper citation handling for property management queries.
+    """
     def __init__(self):
+        """
+        Initialize the LLM Service.
+
+        Sets up the Azure OpenAI client and initializes conversation history storage.
+        """
+        self.logger = logging.getLogger(__name__)
         self.conversation_history = {}
         
         self.client = AzureOpenAI(
@@ -18,6 +31,19 @@ class LLMService:
         self.model = config.AZURE_OPENAI_DEPLOYMENT_NAME
     
     def _build_system_prompt(self, has_uploads: bool = False) -> str:
+        """
+        Build the system prompt for the AI assistant.
+
+        Creates a comprehensive system prompt that includes role definition,
+        formatting requirements, and citation guidelines. Adapts based on whether
+        user uploads are present.
+
+        Args:
+            has_uploads (bool, optional): Whether the query includes uploaded documents. Defaults to False.
+
+        Returns:
+            str: The complete system prompt.
+        """
         base_prompt = """You are an AI assistant for YottaReal property management software, helping leasing agents, property managers, and district managers retrieve information.
 
 Your role:
@@ -73,6 +99,21 @@ SOURCE ATTRIBUTION:
         return base_prompt
     
     def _build_prompt(self, query: str, context: List[Dict], has_uploads: bool = False) -> tuple:
+        """
+        Build the user prompt with document context.
+
+        Organizes the provided document context into a structured prompt,
+        separating uploaded and company documents, and creates a mapping
+        for citation handling.
+
+        Args:
+            query (str): The user's query.
+            context (List[Dict]): List of document contexts with content, filename, etc.
+            has_uploads (bool, optional): Whether uploads are present. Defaults to False.
+
+        Returns:
+            tuple: A tuple containing the prompt string and document mapping dict.
+        """
         # Separate uploaded vs company documents
         uploaded_docs = [doc for doc in context if doc.get("source_type") == "uploaded"]
         company_docs = [doc for doc in context if doc.get("source_type") == "company"]
@@ -143,8 +184,17 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
     
     def _extract_citations_and_renumber(self, response_text: str, doc_mapping: Dict) -> tuple:
         """
-        Extract citations, deduplicate by filename, renumber sequentially, 
-        and update response text with new numbers
+        Extract citations from response text and renumber them sequentially.
+
+        Parses citation patterns like [N → Page X], deduplicates by filename,
+        assigns sequential citation numbers, and updates the response text accordingly.
+
+        Args:
+            response_text (str): The AI response text containing citations.
+            doc_mapping (Dict): Mapping of document numbers to metadata.
+
+        Returns:
+            tuple: Updated response text and list of unique sources with citation numbers.
         """
         # Find all [N → Page X] or [N] patterns
         citation_pattern = r'\[(\d+)(?:\s*→\s*Page\s*(\d+))?\]'
@@ -216,7 +266,17 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         return updated_text, sources
     
     def _clean_response(self, response_text: str) -> str:
-        """Remove unnecessary markdown (keep [N → Page X] citations)"""
+        """
+        Clean the response text by removing unnecessary markdown formatting.
+
+        Removes bold markdown (**text**) while preserving citation brackets [N → Page X].
+
+        Args:
+            response_text (str): The raw response text from the AI.
+
+        Returns:
+            str: The cleaned response text.
+        """
         # Just clean up any ** markdown
         cleaned = re.sub(r'\*\*', '', response_text)
         return cleaned.strip()
@@ -229,6 +289,22 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         has_uploads: bool = False,
         is_comparison: bool = False
     ) -> Dict:
+        """
+        Generate an AI response to a user query using document context.
+
+        Builds prompts, calls Azure OpenAI, processes citations, and returns
+        a structured response with sources. Manages conversation history.
+
+        Args:
+            query (str): The user's question.
+            context (List[Dict]): Document contexts for the query.
+            session_id (Optional[str]): Session identifier for conversation history. Auto-generated if None.
+            has_uploads (bool, optional): Whether user uploads are included. Defaults to False.
+            is_comparison (bool, optional): Whether this is a comparison query. Defaults to False.
+
+        Returns:
+            Dict: Response containing 'answer', 'sources', and 'session_id'.
+        """
         if not session_id:
             session_id = str(uuid.uuid4())
         
@@ -245,13 +321,8 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         uploaded_chars = sum(len(doc['content']) for doc in context if doc.get('source_type') == 'uploaded')
         company_chars = sum(min(len(doc['content']), 10000) for doc in context if doc.get('source_type') == 'company')
         
-        print(f"📊 Prompt Statistics:")
-        print(f"   Total prompt: {total_chars:,} chars (~{estimated_tokens:,} tokens)")
-        print(f"   Uploaded content: {uploaded_chars:,} chars (FULL, no truncation)")
-        print(f"   Company content: {company_chars:,} chars")
-        print(f"   Context window available: ~128,000 tokens")
-        print(f"   Usage: {(estimated_tokens/128000)*100:.1f}%")
-        print(f"   Documents provided: {len(doc_mapping)}")
+        self.logger.info("Prompt Statistics: Total prompt=%d chars (~%d tokens), Uploaded content=%d chars, Company content=%d chars, Usage=%.1f%%, Documents provided=%d", 
+                        total_chars, estimated_tokens, uploaded_chars, company_chars, (estimated_tokens/128000)*100, len(doc_mapping))
         
         try:
             response = await self._generate_azure_openai(
@@ -264,14 +335,12 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
             cleaned_response = self._clean_response(response)
             updated_response, sources = self._extract_citations_and_renumber(cleaned_response, doc_mapping)
             
-            print(f"✅ Generated response with inline citations")
-            print(f"   Documents provided: {len(doc_mapping)}")
-            print(f"   Unique documents cited: {len(sources)}")
+            self.logger.info("Generated response with inline citations: Documents provided=%d, Unique documents cited=%d", len(doc_mapping), len(sources))
             if sources:
                 for src in sources:
-                    print(f"     [{src['citation_number']}] {src['filename']}")
+                    self.logger.debug("Cited document [%d] %s", src['citation_number'], src['filename'])
             else:
-                print(f"   ⚠️  No documents cited")
+                self.logger.warning("No documents cited")
             
             # Store conversation
             self.conversation_history[session_id].append({
@@ -283,7 +352,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
             if not sources and context:
                 # Only show fallback if there are enough docs (likely a real query)
                 if len(context) >= 5:
-                    print(f"   ⚠️  Falling back to showing all provided documents")
+                    self.logger.warning("Falling back to showing all provided documents")
                     sources = []
                     seen_files = set()
                     citation_num = 1  # Start citation numbering
@@ -303,7 +372,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
                             citation_num += 1
                 else:
                     # Likely casual chat that slipped through - don't show sources
-                    print(f"   ℹ️  No citations and few docs - likely casual chat, not showing sources")
+                    self.logger.info("No citations and few docs - likely casual chat, not showing sources")
             
             return {
                 "answer": updated_response,
@@ -312,9 +381,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
             }
         
         except Exception as e:
-            print(f"❌ LLM generation error: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.exception("LLM generation error: %s", e)
             return {
                 "answer": "I apologize, but I encountered an error processing your request.",
                 "sources": [],
@@ -327,6 +394,20 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         user_prompt: str,
         session_id: str
     ) -> str:
+        """
+        Generate a response using Azure OpenAI Chat Completions.
+
+        Constructs the message history including conversation context and
+        calls the Azure OpenAI API to generate a response.
+
+        Args:
+            system_prompt (str): The system prompt defining AI behavior.
+            user_prompt (str): The user query with context.
+            session_id (str): Session identifier for conversation history.
+
+        Returns:
+            str: The generated response text.
+        """
         messages = [{"role": "system", "content": system_prompt}]
         
         # Add ALL conversation history
@@ -339,7 +420,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         
         # Log conversation length for monitoring
         total_history_messages = len(self.conversation_history[session_id])
-        print(f"📝 Including {total_history_messages} previous exchanges in context")
+        self.logger.info("Including %d previous exchanges in context", total_history_messages)
         
         response = self.client.chat.completions.create(
             model=self.model,

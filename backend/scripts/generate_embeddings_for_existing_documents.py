@@ -1,4 +1,11 @@
 # backend/scripts/generate_embeddings_from_blob_storage.py - WITH PAGE NUMBER TRACKING
+"""
+Script to generate embeddings for existing documents in blob storage.
+
+This script processes PDF files from Azure Blob Storage, extracts text with page numbers
+using Document Intelligence, chunks the text with overlap, generates embeddings, and
+uploads the chunks to Azure Cognitive Search with proper page number tracking.
+"""
 
 import asyncio
 from azure.storage.blob import BlobServiceClient
@@ -10,6 +17,7 @@ import sys
 import os
 import base64
 import hashlib
+import logging
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
@@ -23,15 +31,18 @@ CHUNK_OVERLAP = 200  # overlap between chunks
 
 def chunk_text_with_pages(page_texts: list, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list:
     """
-    Split text into overlapping chunks while tracking page numbers
-    
+    Split text into overlapping chunks while tracking page numbers.
+
+    Concatenates text from all pages and splits it into chunks of specified size with overlap.
+    Each chunk is assigned the page number from its middle character position.
+
     Args:
-        page_texts: List of dicts with {"page_number": int, "text": str}
-        chunk_size: Maximum characters per chunk
-        overlap: Overlap between chunks
-    
+        page_texts (list): List of dicts with {"page_number": int, "text": str}.
+        chunk_size (int, optional): Maximum characters per chunk. Defaults to CHUNK_SIZE.
+        overlap (int, optional): Overlap between chunks in characters. Defaults to CHUNK_OVERLAP.
+
     Returns:
-        List of dicts with {"text": str, "page_number": int, "chunk_number": int}
+        list: List of dicts with {"text": str, "page_number": int, "chunk_number": int}.
     """
     chunks = []
     chunk_number = 0
@@ -93,18 +104,43 @@ def chunk_text_with_pages(page_texts: list, chunk_size: int = CHUNK_SIZE, overla
 
 
 def generate_chunk_id(parent_id: str, chunk_number: int) -> str:
-    """Generate unique chunk ID"""
+    """
+    Generate a unique chunk ID from parent ID and chunk number.
+
+    Creates a base64-encoded unique identifier for each chunk.
+
+    Args:
+        parent_id (str): The parent document identifier.
+        chunk_number (int): The chunk number within the document.
+
+    Returns:
+        str: A unique base64-encoded chunk ID.
+    """
     combined = f"{parent_id}_chunk_{chunk_number}"
     return base64.b64encode(combined.encode()).decode()
 
 
 async def extract_text_from_blob(blob_client, filename: str, doc_intelligence_client) -> dict:
-    """Download blob and extract text with page numbers using Document Intelligence"""
+    """
+    Download a blob and extract text with page numbers using Document Intelligence.
+
+    Downloads the blob content, processes it with Azure Document Intelligence
+    to extract text page by page, and returns structured page data.
+
+    Args:
+        blob_client: Azure Blob client for the specific blob.
+        filename (str): Name of the file being processed.
+        doc_intelligence_client: Azure Document Intelligence client.
+
+    Returns:
+        dict: Dictionary containing 'page_texts', 'page_count', 'success', and optionally 'error'.
+    """
+    logger = logging.getLogger(__name__)
     try:
-        print(f"   📥 Downloading {filename}...")
+        logger.info("Downloading %s", filename)
         blob_data = blob_client.download_blob().readall()
         
-        print(f"   📄 Extracting text with page tracking (size: {len(blob_data)} bytes)...")
+        logger.info("Extracting text with page tracking (size: %d bytes)", len(blob_data))
         
         # Encode to base64
         base64_source = base64.b64encode(blob_data).decode('utf-8')
@@ -142,7 +178,7 @@ async def extract_text_from_blob(blob_client, filename: str, doc_intelligence_cl
         page_count = len(page_texts)
         total_chars = sum(len(p["text"]) for p in page_texts)
         
-        print(f"   ✅ Extracted {total_chars} characters from {page_count} pages")
+        logger.info("Extracted %d characters from %d pages", total_chars, page_count)
         
         return {
             "page_texts": page_texts,
@@ -151,9 +187,7 @@ async def extract_text_from_blob(blob_client, filename: str, doc_intelligence_cl
         }
         
     except Exception as e:
-        print(f"   ❌ Extraction error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Extraction error for %s: %s", filename, e)
         return {
             "page_texts": [],
             "page_count": 0,
@@ -164,17 +198,22 @@ async def extract_text_from_blob(blob_client, filename: str, doc_intelligence_cl
 
 async def generate_embeddings_from_blob_storage():
     """
-    Generate embeddings by reading full documents from blob storage
-    with actual page number tracking
-    """
+    Generate embeddings by reading full documents from blob storage with page number tracking.
 
-    print("=" * 70)
-    print("🚀 Starting Full Document Embedding Generation from Blob Storage")
-    print("   WITH PAGE NUMBER TRACKING")
-    print("=" * 70)
-    print(f"📏 Chunk size: {CHUNK_SIZE} characters")
-    print(f"🔗 Chunk overlap: {CHUNK_OVERLAP} characters")
-    print(f"📦 Reading from: {config.AZURE_STORAGE_CONTAINER_NAME}")
+    Main function that orchestrates the entire process:
+    - Clears existing search index
+    - Lists PDF files in blob storage
+    - Extracts text with page numbers from each PDF
+    - Chunks the text with overlap and page tracking
+    - Generates embeddings for each chunk
+    - Uploads chunks to Azure Cognitive Search
+
+    This creates searchable chunks with accurate page number references.
+    """
+    logger = logging.getLogger(__name__)
+    
+    logger.info("Starting Full Document Embedding Generation from Blob Storage with page number tracking")
+    logger.info("Configuration: Chunk size=%d, Overlap=%d, Container=%s", CHUNK_SIZE, CHUNK_OVERLAP, config.AZURE_STORAGE_CONTAINER_NAME)
 
     # Initialize services
     embedding_service = EmbeddingService()
@@ -200,7 +239,7 @@ async def generate_embeddings_from_blob_storage():
 
     try:
         # Clear existing index
-        print(f"\n🗑️  Clearing existing index...")
+        logger.info("Clearing existing index")
         
         existing_results = search_client.search(
             search_text="*",
@@ -211,38 +250,37 @@ async def generate_embeddings_from_blob_storage():
         existing_ids = [dict(r)["chunk_id"] for r in existing_results]
         
         if existing_ids:
-            print(f"   Found {len(existing_ids)} existing entries to delete...")
+            logger.info("Found %d existing entries to delete", len(existing_ids))
             batch_size = 1000
             for i in range(0, len(existing_ids), batch_size):
                 batch = existing_ids[i:i+batch_size]
                 docs_to_delete = [{"chunk_id": doc_id} for doc_id in batch]
                 search_client.delete_documents(documents=docs_to_delete)
-                print(f"   Deleted {min(i+batch_size, len(existing_ids))}/{len(existing_ids)}")
-            print(f"   ✅ Index cleared")
+                logger.info("Deleted %d/%d entries", min(i+batch_size, len(existing_ids)), len(existing_ids))
+            logger.info("Index cleared")
         else:
-            print(f"   Index is empty")
+            logger.info("Index is empty")
 
         # List all blobs in container
-        print(f"\n📥 Listing files in blob storage...")
+        logger.info("Listing files in blob storage")
         
         blobs = list(container_client.list_blobs())
         pdf_blobs = [b for b in blobs if b.name.lower().endswith('.pdf')]
         
-        print(f"✓ Found {len(pdf_blobs)} PDF files")
+        logger.info("Found %d PDF files", len(pdf_blobs))
 
         # Process each blob
         total_chunks_created = 0
         documents_processed = 0
         chunks_to_upload = []
 
-        print(f"\n⚙️  Processing PDFs and creating chunks with page numbers...")
-        print("-" * 70)
+        logger.info("Processing PDFs and creating chunks with page numbers...")
 
         for blob_info in pdf_blobs:
             blob_name = blob_info.name
             documents_processed += 1
             
-            print(f"\n  [{documents_processed}/{len(pdf_blobs)}] Processing: {blob_name}")
+            logger.info("Processing document %d/%d: %s", documents_processed, len(pdf_blobs), blob_name)
             
             # Get blob client
             blob_client = container_client.get_blob_client(blob_name)
@@ -255,7 +293,7 @@ async def generate_embeddings_from_blob_storage():
             )
             
             if not extraction_result['success'] or not extraction_result['page_texts']:
-                print(f"   ⚠️  Skipping: No text extracted")
+                logger.warning("Skipping %s: No text extracted", blob_name)
                 continue
             
             page_texts = extraction_result['page_texts']
@@ -269,15 +307,13 @@ async def generate_embeddings_from_blob_storage():
             total_chunks_created += len(chunks)
 
             total_chars = sum(len(p["text"]) for p in page_texts)
-            print(f"   📄 Document: {total_chars} chars, {page_count} pages")
-            print(f"   ✂️  Created {len(chunks)} chunks with page numbers")
+            logger.info("Document stats: %d chars, %d pages, created %d chunks", total_chars, page_count, len(chunks))
 
             # Show sample chunk-to-page mapping
             if chunks:
                 sample_size = min(3, len(chunks))
-                print(f"   📍 Sample chunk → page mapping:")
                 for i in range(sample_size):
-                    print(f"      Chunk {chunks[i]['chunk_number']} → Page {chunks[i]['page_number']}")
+                    logger.debug("Sample mapping: Chunk %d → Page %d", chunks[i]['chunk_number'], chunks[i]['page_number'])
 
             # Process each chunk
             for chunk_info in chunks:
@@ -311,50 +347,36 @@ async def generate_embeddings_from_blob_storage():
 
                 # Upload in batches of 50
                 if len(chunks_to_upload) >= 50:
-                    print(f"      📤 Uploading batch of {len(chunks_to_upload)} chunks...")
+                    logger.info("Uploading batch of %d chunks", len(chunks_to_upload))
                     try:
                         search_client.upload_documents(documents=chunks_to_upload)
-                        print(f"      ✅ Batch uploaded")
+                        logger.info("Batch uploaded successfully")
                     except Exception as batch_error:
-                        print(f"      ❌ Batch error: {batch_error}")
+                        logger.error("Batch upload error: %s", batch_error)
                         # Try one by one
                         for single_doc in chunks_to_upload:
                             try:
                                 search_client.upload_documents(documents=[single_doc])
                             except Exception as doc_error:
-                                print(f"        ❌ Failed chunk: {doc_error}")
+                                logger.error("Failed to upload chunk: %s", doc_error)
                     
                     chunks_to_upload = []
 
         # Upload remaining chunks
         if chunks_to_upload:
-            print(f"\n  📤 Uploading final batch of {len(chunks_to_upload)} chunks...")
+            logger.info("Uploading final batch of %d chunks", len(chunks_to_upload))
             try:
                 search_client.upload_documents(documents=chunks_to_upload)
-                print(f"  ✅ Final batch uploaded")
+                logger.info("Final batch uploaded successfully")
             except Exception as batch_error:
-                print(f"  ❌ Final batch error: {batch_error}")
+                logger.error("Final batch upload error: %s", batch_error)
 
         # Summary
-        print("\n" + "=" * 70)
-        print("✅ FULL DOCUMENT EMBEDDING GENERATION COMPLETE!")
-        print("   WITH PAGE NUMBER TRACKING")
-        print("=" * 70)
-        print(f"📊 Summary:")
-        print(f"   ✓ PDF files processed: {documents_processed}")
-        print(f"   ✓ Total chunks created: {total_chunks_created}")
-        print(f"   ✓ Average chunks per document: {total_chunks_created/documents_processed:.1f}")
-        print(f"   ✓ Each chunk has actual page number from PDF")
-        print(f"\n🎉 Your index now has {total_chunks_created} searchable chunks with page numbers!")
-        print(f"   Each chunk is ~{CHUNK_SIZE} characters")
-        print(f"   Model: {config.AZURE_OPENAI_EMBEDDING_MODEL}")
-        print(f"   Dimensions: {config.EMBEDDING_DIMENSIONS}")
-        print("=" * 70)
+        logger.info("Embedding generation complete: %d documents processed, %d chunks created", documents_processed, total_chunks_created)
+        logger.info("Configuration: Model=%s, Dimensions=%d, Chunk size=%d", config.AZURE_OPENAI_EMBEDDING_MODEL, config.EMBEDDING_DIMENSIONS, CHUNK_SIZE)
 
     except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Error in embedding generation: %s", e)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,33 @@
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-python-dotenv==1.0.0
-pydantic==2.5.3
-azure-search-documents==11.4.0
-azure-core==1.30.0
-openai==1.54.0
-httpx==0.27.0
-azure-ai-documentintelligence==1.0.0b1
-azure-storage-blob==12.19.0
-python-multipart==0.0.6
+# YottaReal Bot API - Python Dependencies
+# This file contains all Python packages required for the FastAPI backend application
+
+# ==========================================
+# Web Framework & Server
+# ==========================================
+fastapi==0.109.0              # Modern, fast web framework for building APIs
+uvicorn[standard]==0.27.0     # ASGI server for running FastAPI applications
+
+# ==========================================
+# Configuration & Environment
+# ==========================================
+python-dotenv==1.0.0          # Load environment variables from .env files
+pydantic==2.5.3               # Data validation and settings management
+
+# ==========================================
+# Azure Services
+# ==========================================
+azure-search-documents==11.4.0    # Azure Cognitive Search client library
+azure-core==1.30.0                # Core Azure client library components
+azure-ai-documentintelligence==1.0.0b1  # Azure Document Intelligence (OCR/text extraction)
+azure-storage-blob==12.19.0       # Azure Blob Storage client library
+
+# ==========================================
+# AI & Machine Learning
+# ==========================================
+openai==1.54.0                 # OpenAI API client for chat completions and embeddings
+httpx==0.27.0                  # HTTP client for making requests (used by OpenAI)
+
+# ==========================================
+# File Upload Handling
+# ==========================================
+python-multipart==0.0.6        # Multipart form data parsing for file uploads
