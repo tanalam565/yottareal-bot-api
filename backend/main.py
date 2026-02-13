@@ -1,5 +1,3 @@
-# backend/main.py - WITH IMPROVED CASUAL CHAT DETECTION
-
 import logging
 from fastapi import FastAPI, HTTPException, Security, Depends, UploadFile, File, Form
 from fastapi.security import APIKeyHeader
