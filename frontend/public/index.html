@@ -1,17 +1,74 @@
+<!--
+  YottaReal Bot API - Frontend Entry Point
+  ========================================
+
+  This is the main HTML file for the YottaReal Property Management Chatbot frontend.
+  It serves as the entry point for the React single-page application (SPA).
+
+  The file is automatically generated/updated by Create React App and contains:
+  - Essential meta tags for proper rendering and SEO
+  - Theme color for mobile browsers
+  - Root div where React mounts the application
+  - Fallback message for users with JavaScript disabled
+
+  Build Process:
+  - This file is processed by webpack during the build
+  - CSS and JS bundles are automatically injected
+  - Meta tags can be customized in public/index.html
+-->
+
 <!DOCTYPE html>
+<!-- HTML5 document type declaration -->
 <html lang="en">
+  <!--
+    Document head contains metadata, stylesheets, and scripts
+    that are loaded before the page content
+  -->
   <head>
+    <!-- Character encoding for proper text rendering -->
     <meta charset="utf-8" />
+
+    <!--
+      Viewport meta tag for responsive design
+      - width=device-width: Matches device screen width
+      - initial-scale=1: No zoom on page load
+      - maximum-scale=5: Allows reasonable zoom (accessibility)
+      - user-scalable=yes: Allows user zoom control
+    -->
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes" />
+
+    <!-- Theme color for mobile browsers (address bar, etc.) -->
     <meta name="theme-color" content="#a840e0" />
+
+    <!--
+      Page description for SEO and social media sharing
+      Describes the YottaReal Property Management Chatbot application
+    -->
     <meta
       name="description"
       content="Yottareal Property Management Chatbot"
     />
+
+    <!-- Page title displayed in browser tab and bookmarks -->
     <title>Yottareal Assistant</title>
   </head>
+
+  <!--
+    Document body contains the visible page content
+    In React SPAs, this is minimal as content is rendered by JavaScript
+  -->
   <body>
+    <!--
+      Fallback message for users with JavaScript disabled
+      Provides basic feedback when the app cannot load
+    -->
     <noscript>You need to enable JavaScript to run this app.</noscript>
+
+    <!--
+      Root div where React mounts the application
+      This is the entry point for the React component tree
+      All React components will be rendered inside this div
+    -->
     <div id="root"></div>
   </body>
 </html>
