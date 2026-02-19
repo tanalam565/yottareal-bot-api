@@ -710,3 +710,16 @@
     padding-bottom: env(safe-area-inset-bottom, 10px);
   }
 }
+
+.upload-limits {
+  font-size: 11px;
+  color: #55585f;
+  font-style: italic;
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .upload-limits {
+    font-size: 10px;
+  }
+}

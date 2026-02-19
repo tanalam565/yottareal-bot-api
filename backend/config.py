@@ -1,20 +1,4 @@
 # config.py - Full Updated Code
-"""
-Configuration module for the YottaReal Bot API.
-
-This module loads configuration values from environment variables using python-dotenv.
-It provides centralized configuration for all Azure services used in the application:
-
-- Azure Blob Storage: For document storage
-- Azure Cognitive Search: For document indexing and search
-- Azure OpenAI: For chat completions and text embeddings
-- Azure Document Intelligence: For document text extraction
-- CORS Configuration: For cross-origin resource sharing
-- Application settings: For API behavior and limits
-
-All values have sensible defaults for development, but production deployments
-should set appropriate environment variables.
-"""
 
 import os
 from dotenv import load_dotenv
@@ -53,13 +37,35 @@ AZURE_DOCUMENT_INTELLIGENCE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "
 # API Key Authentication
 CHATBOT_API_KEY = os.getenv("CHATBOT_API_KEY", "")
 
-# CORS Configuration
-CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
-
 # Application Settings
 MAX_SEARCH_RESULTS = 15
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
-# Retruval Settings: Maximum chunks to retrieve from a single parent document
+# Retrieval Settings
 MAX_CHUNKS_PER_DOCUMENT = 7
+
+# Redis Configuration
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+
+# Session and History Settings
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "7200"))  # 2 hours
+MAX_CONVERSATION_TURNS = int(os.getenv("MAX_CONVERSATION_TURNS", "10"))
+
+# File Upload Limits
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "15"))
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_UPLOAD_PAGES = int(os.getenv("MAX_UPLOAD_PAGES", "15"))
+MAX_UPLOADS_PER_SESSION = int(os.getenv("MAX_UPLOADS_PER_SESSION", "5"))
+
+# Rate Limiting
+RATE_LIMIT_CHAT = os.getenv("RATE_LIMIT_CHAT", "20/minute")
+RATE_LIMIT_UPLOAD = os.getenv("RATE_LIMIT_UPLOAD", "5/minute")
+
+# Request Timeouts
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
+
+# CORS - comma-separated list of allowed origins
+CORS_ALLOWED_ORIGINS = os.getenv(
+    "CORS_ALLOWED_ORIGINS","http://localhost:3000,https://fluffy-spoon-pj7rwgw4566xc7477-3000.app.github.dev"
+).split(",")
