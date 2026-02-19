@@ -1,5 +1,39 @@
-# backend/main.py - WITH REDIS SESSIONS, RATE LIMITING, FILE VALIDATION
+"""
+YottaReal Bot API - FastAPI Backend.
 
+This module defines the public API for chat, upload, cleanup, and operational
+endpoints. It wires request validation, rate limiting, authentication, and
+service orchestration for Azure Search, Azure OpenAI, and Document Intelligence.
+
+This module provides the main FastAPI application for the YottaReal chatbot API.
+It handles chat interactions, document uploads, session management, and integrates
+with Azure Cognitive Search, Azure OpenAI, and Azure Document Intelligence services.
+
+Key Features:
+- Chat endpoint with hybrid search (vector + keyword) and LLM response generation
+- Document upload with automatic text extraction using Azure Document Intelligence
+- Session-based document management for temporary user uploads
+- API key authentication
+- Indexer status and manual trigger endpoints
+- Health check endpoint
+
+Endpoints:
+- POST /api/chat: Process chat messages with document context
+- POST /api/upload: Upload documents for session-based queries
+- POST /api/cleanup-session: Clean up session documents
+- GET /api/indexer/status: Get Azure Search indexer status
+- POST /api/indexer/run: Manually trigger indexer
+- GET /api/health: Health check (public)
+
+Environment Variables:
+- CHATBOT_API_KEY: Optional API key for authentication
+- Various Azure service configurations (see config.py)
+
+Dependencies:
+- fastapi: Web framework
+- uvicorn: ASGI server
+- Azure Cognitive Search, OpenAI, Document Intelligence services
+"""
 from contextlib import asynccontextmanager
 import logging
 from fastapi import FastAPI, HTTPException, Security, Depends, UploadFile, File, Form, Request
@@ -20,14 +54,6 @@ from services.llm_service import LLMService
 from services.document_intelligence_service import DocumentIntelligenceService
 from services.redis_service import get_redis_client, close_redis
 import config
-
-"""
-YottaReal Bot API - FastAPI Backend.
-
-Provides chat, upload, session cleanup, indexer controls, and health endpoints.
-The application integrates Azure Cognitive Search, Azure OpenAI, Azure Document
-Intelligence, and Redis-backed session/history state.
-"""
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,7 +98,18 @@ ALLOWED_CONTENT_TYPES = [
 
 
 def validate_file_content(content: bytes, content_type: str) -> bool:
-    """Validate file using magic bytes, not just the content-type header"""
+    """
+    Validate uploaded file bytes against expected signatures.
+
+    Uses magic-byte checks for binary types and UTF-8 probe logic for plain text.
+
+    Args:
+        content: Raw file bytes.
+        content_type: Declared MIME type from upload metadata.
+
+    Returns:
+        bool: True when content appears to match supported file type rules.
+    """
     for sig in ALLOWED_SIGNATURES:
         if content[:len(sig)] == sig:
             return True
@@ -86,14 +123,15 @@ def validate_file_content(content: bytes, content_type: str) -> bool:
     return False
 
 
-# ── Lifespan: close Redis pool on shutdown ───────────────────────────────────────
+# Lifespan: close Redis pool on shutdown to prevent resource leaks 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Application lifespan context for startup/shutdown resource management."""
     yield
     await close_redis()
 
 
-# ── Rate limiter ─────────────────────────────────────────────────────────────────
+# Rate limiter
 limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(title="Property Management Chatbot API", lifespan=lifespan)
@@ -113,7 +151,7 @@ search_service = AzureSearchService()
 llm_service = LLMService()
 doc_intelligence_service = DocumentIntelligenceService()
 
-# ── API Key Authentication ────────────────────────────────────────────────────────
+# API Key Authentication
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -172,7 +210,7 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
     try:
         logger.info(f"Chat request - Session ID: {body.session_id}, Query: {body.message}")
 
-        # ===== STEP 1: GET ALL UPLOADED DOCUMENTS FOR THIS SESSION (REDIS) =====
+        # GET ALL UPLOADED DOCUMENTS FOR THIS SESSION (REDIS) 
         session_context = []
         redis_client = await get_redis_client()
 
@@ -203,16 +241,10 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
                     })
 
             logger.info(f"Uploaded documents in session: {len(session_docs)} files")
-            logger.debug(f"Total pages across all uploads: {len(session_context)}")
-            for i, doc in enumerate(session_docs, 1):
-                page_count = len(doc.get('page_texts', [])) if 'page_texts' in doc else 1
-                content_preview = doc['content'][:100].replace('\n', ' ') if 'content' in doc else doc.get('page_texts', [{}])[0].get('text', '')[:100].replace('\n', ' ')
-                logger.debug(f"{i}. {doc['filename']} ({page_count} pages)")
-                logger.debug(f"Content preview: {content_preview}...")
         else:
             logger.info("No uploaded documents in this session")
 
-        # ===== STEP 2: CHECK IF CASUAL CHAT =====
+        # CHECK IF CASUAL CHAT
         casual_patterns = [
             'hi', 'hello', 'hey', 'how are you', 'thanks',
             'thank you', 'bye', 'goodbye', 'good morning', 'good evening',
@@ -234,7 +266,7 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
 
         logger.info(f"Query type: {'Casual chat' if is_casual else 'Document query'}")
 
-        # ===== STEP 3: SEARCH COMPANY DOCUMENTS =====
+        # SEARCH COMPANY DOCUMENTS
         indexed_results = []
         if not is_casual:
             logger.info("Searching company documents")
@@ -242,12 +274,10 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
             for doc in indexed_results:
                 doc["source_type"] = "company"
             logger.info(f"Found {len(indexed_results)} company documents")
-            for i, doc in enumerate(indexed_results, 1):
-                logger.debug(f"{i}. {doc['filename']}")
         else:
             logger.info("Skipping document search (casual chat)")
 
-        # ===== STEP 4: BUILD CONTEXT FOR LLM =====
+        # BUILD CONTEXT FOR LLM
         all_context = []
 
         if is_casual:
@@ -256,25 +286,17 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
         elif session_context:
             all_context = session_context + indexed_results[:15]
             logger.info(f"Context for LLM: {len(all_context)} document pages")
-            logger.debug(f"ALL {len(session_context)} uploaded pages")
-            logger.debug(f"Top {len(indexed_results[:15])} company documents")
         else:
             all_context = indexed_results[:15]
             logger.info(f"Context for LLM: {len(all_context)} company documents")
 
-        # ===== STEP 5: LOG WHAT'S BEING SENT =====
+        # LOG WHAT'S BEING SENT
         logger.info(f"Sending to LLM ({len(all_context)} document pages)")
-        for i, doc in enumerate(all_context, 1):
-            doc_type = doc.get('source_type', 'unknown')
-            page_num = doc.get('page_number', 1)
-            icon = "📤" if doc_type == "uploaded" else "📁"
-            logger.debug(f"{i}. {icon} [{doc_type}] {doc['filename']} - Page {page_num}")
-            logger.debug(f"Content length: {len(doc.get('content', ''))} chars")
 
         if not all_context and not is_casual:
             logger.warning("No documents in context for non-casual query")
 
-        # ===== STEP 6: GENERATE RESPONSE =====
+        # GENERATE RESPONSE
         response = await llm_service.generate_response(
             query=body.message,
             context=all_context,
@@ -293,10 +315,6 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
         unique_sources = list(source_map.values())
 
         logger.info(f"Sources after deduplication: {len(unique_sources)}")
-        for i, src in enumerate(unique_sources, 1):
-            source_type = src.get('source_type', 'unknown')
-            icon = "📤" if source_type == "uploaded" else "📁"
-            logger.debug(f"{i}. {icon} {src.get('filename', 'Unknown')}")
 
         return ChatResponse(
             response=response["answer"],
@@ -399,9 +417,6 @@ async def upload_document(
 
         logger.info(f"Stored in Redis session: {session_id}")
         logger.info(f"Session now has {len(current_docs)}/{config.MAX_UPLOADS_PER_SESSION} documents")
-        for i, doc in enumerate(current_docs, 1):
-            page_count = len(doc.get('page_texts', [])) if 'page_texts' in doc else doc.get('page_count', 1)
-            logger.debug(f"{i}. {doc['filename']} ({page_count} pages, {len(doc.get('content', ''))} chars)")
 
         return {
             "message": "File uploaded and ready for queries!",
@@ -470,7 +485,7 @@ async def cleanup_session(
 
 @app.get("/api/indexer/status")
 async def get_indexer_status(authenticated: bool = Depends(verify_api_key)):
-    """Get status of Azure Search indexer"""
+    """Return current Azure Search indexer status and latest execution metadata."""
     try:
         status = await search_service.get_indexer_status()
         return status
@@ -480,7 +495,7 @@ async def get_indexer_status(authenticated: bool = Depends(verify_api_key)):
 
 @app.post("/api/indexer/run")
 async def run_indexer(authenticated: bool = Depends(verify_api_key)):
-    """Manually trigger Azure Search indexer"""
+    """Manually trigger Azure Search indexer to process newly available documents."""
     try:
         success = await search_service.run_indexer()
         if success:
@@ -493,7 +508,12 @@ async def run_indexer(authenticated: bool = Depends(verify_api_key)):
 
 @app.get("/api/health")
 async def health_check():
-    """Health check — verifies Redis is reachable"""
+    """
+    Basic health check endpoint.
+
+    Verifies Redis connectivity and reports degraded status if Redis is
+    unreachable while keeping endpoint responsive.
+    """
     health = {"status": "healthy", "redis": "healthy"}
 
     try:

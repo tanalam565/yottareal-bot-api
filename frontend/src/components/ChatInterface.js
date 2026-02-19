@@ -65,15 +65,6 @@ function ChatInterface() {
 
   // ============ Effect Hooks ============
 
-  /**
-   * Log session ID only in development mode
-   */
-  useEffect(() => {
-    if (process.env.NODE_ENV === 'development') {
-      console.log('🔑 Session ID:', sessionId);
-    }
-  }, [sessionId]);
-
   // ============ Helper Functions ============
 
   /**
@@ -99,9 +90,6 @@ function ChatInterface() {
   useEffect(() => {
     const cleanupSession = async () => {
       if (uploadedFiles.length > 0 && sessionId) {
-        if (process.env.NODE_ENV === 'development') {
-          console.log('🗑️ Cleaning up session on unmount:', sessionId);
-        }
         try {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
@@ -277,19 +265,11 @@ function ChatInterface() {
     setUploading(true);
     const uploadResults = [];
 
-    if (process.env.NODE_ENV === 'development') {
-      console.log('📤 Uploading files with session ID:', sessionId);
-    }
-
     try {
       for (const file of files) {
         const formData = new FormData();
         formData.append('file', file);
         formData.append('session_id', sessionId);
-
-        if (process.env.NODE_ENV === 'development') {
-          console.log('📤 Uploading:', file.name, 'with session:', sessionId);
-        }
 
         const response = await fetch(
           `${API_BASE_URL}/upload`,
@@ -304,9 +284,6 @@ function ChatInterface() {
 
         if (response.ok) {
           const result = await response.json();
-          if (process.env.NODE_ENV === 'development') {
-            console.log('✅ Upload successful. Backend returned session:', result.session_id);
-          }
 
           uploadResults.push({
             name: file.name,
@@ -391,10 +368,6 @@ function ChatInterface() {
       return;
     }
 
-    if (process.env.NODE_ENV === 'development') {
-      console.log('🗑️ User manually clearing uploads');
-    }
-
     try {
       const response = await fetch(
         `${API_BASE_URL}/cleanup-session`,
@@ -448,26 +421,13 @@ function ChatInterface() {
     setInput('');
     setLoading(true);
 
-    if (process.env.NODE_ENV === 'development') {
-      console.log('💬 Sending chat with session ID:', sessionId);
-      console.log('📊 Uploaded files count:', uploadedFiles.length);
-    }
-
     try {
       const response = await sendMessage(input, sessionId);
-
-      if (process.env.NODE_ENV === 'development') {
-        console.log('✅ Chat response received');
-        console.log('🔑 Backend returned session ID:', response.session_id);
-        console.log('📚 Sources count:', response.sources?.length || 0);
-      }
 
       if (!sessionId || sessionId === 'temp') {
         setSessionId(response.session_id);
       } else if (response.session_id !== sessionId) {
-        if (process.env.NODE_ENV === 'development') {
-          console.warn('⚠️ Backend returned different session ID!');
-        }
+        // Keep existing session id stable if backend returns a different one unexpectedly.
       }
 
       const botMessage = {

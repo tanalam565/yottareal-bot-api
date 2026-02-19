@@ -19,7 +19,10 @@ async def get_redis_client() -> aioredis.Redis:
     Get a Redis client backed by a shared async connection pool.
 
     Returns:
-        aioredis.Redis: Redis client instance.
+        aioredis.Redis: Redis client instance bound to the module-level pool.
+
+    The connection pool is created lazily on first use and reused by all
+    callers to minimize connection overhead.
     """
     global _redis_pool
     if _redis_pool is None:
@@ -34,7 +37,11 @@ async def get_redis_client() -> aioredis.Redis:
 
 
 async def close_redis():
-    """Close and reset the shared Redis connection pool."""
+    """
+    Close and reset the shared Redis connection pool.
+
+    Safe to call multiple times; no-op if pool was never created.
+    """
     global _redis_pool
     if _redis_pool:
         await _redis_pool.aclose()

@@ -12,10 +12,10 @@ import logging
 import config
 from services.http_client_service import get_shared_http_client
 
-logger = logging.getLogger(__name__)
-
 
 class EmbeddingService:
+    """Create vector embeddings for search and retrieval pipelines."""
+
     def __init__(self):
         """Initialize embedding client and model configuration."""
         # Use shared HTTP client for connection pooling
@@ -28,8 +28,14 @@ class EmbeddingService:
         self.deployment = config.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
         self.model = config.AZURE_OPENAI_EMBEDDING_MODEL
         self.dimensions = config.EMBEDDING_DIMENSIONS
+        self.logger = logging.getLogger(__name__)
 
-        logger.info(f"Embedding service initialized: model={self.model}, deployment={self.deployment}, dimensions={self.dimensions}")
+        self.logger.info(
+            "Embedding service initialized: model=%s, deployment=%s, dimensions=%s",
+            self.model,
+            self.deployment,
+            self.dimensions,
+        )
 
     @retry(
         retry=retry_if_exception_type((RateLimitError, APIConnectionError)),
@@ -37,7 +43,7 @@ class EmbeddingService:
         stop=stop_after_attempt(3)
     )
     def _generate_with_retry(self, text: str) -> List[float]:
-        """Inner sync call with tenacity retry — raise to allow retries"""
+        """Execute a single embedding request with retry support from tenacity."""
         response = self.client.embeddings.create(
             input=text,
             model=self.deployment,
@@ -47,8 +53,14 @@ class EmbeddingService:
 
     def generate_embedding(self, text: str) -> List[float]:
         """
-        Generate embedding vector for a single text string.
-        Sync — callers in async contexts should use asyncio.to_thread().
+        Generate embedding vector for a single text payload.
+
+        Text is truncated to Azure token-safe limits before request execution.
+        This method is synchronous; async callers should invoke via
+        ``asyncio.to_thread``.
+
+        Returns:
+            List[float]: Embedding vector with configured dimensions.
         """
         try:
             if len(text) > 32000:
@@ -57,18 +69,23 @@ class EmbeddingService:
             embedding = self._generate_with_retry(text)
 
             if len(embedding) != self.dimensions:
-                logger.warning(f"Expected {self.dimensions} dimensions, got {len(embedding)}")
+                self.logger.warning("Expected %s dimensions, got %s", self.dimensions, len(embedding))
 
             return embedding
 
         except Exception as e:
-            logger.error(f"Error generating embedding after retries: {e}")
+            self.logger.error("Error generating embedding after retries: %s", e)
             return [0.0] * self.dimensions
 
     def generate_embeddings_batch(self, texts: List[str], batch_size: int = 16) -> List[List[float]]:
         """
-        Generate embeddings for multiple texts in batches.
-        Sync — used in scripts only.
+        Generate embeddings for multiple texts in fixed-size batches.
+
+        Primarily used in indexing scripts where batch throughput is preferred
+        over per-request latency.
+
+        Returns:
+            List[List[float]]: Embedding vectors in the same order as inputs.
         """
         all_embeddings = []
 
@@ -76,8 +93,6 @@ class EmbeddingService:
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i + batch_size]
                 truncated_batch = [text[:32000] if len(text) > 32000 else text for text in batch]
-
-                logger.debug(f"Processing embedding batch {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1}")
 
                 response = self.client.embeddings.create(
                     input=truncated_batch,
@@ -91,5 +106,5 @@ class EmbeddingService:
             return all_embeddings
 
         except Exception as e:
-            logger.error(f"Error generating batch embeddings: {e}")
+            self.logger.error("Error generating batch embeddings: %s", e)
             return [[0.0] * self.dimensions for _ in texts]

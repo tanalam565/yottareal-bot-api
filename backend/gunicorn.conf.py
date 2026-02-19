@@ -1,4 +1,9 @@
-# backend/gunicorn.conf.py
+"""
+Gunicorn runtime configuration for the backend API.
+
+Defines bind address, worker/process behavior, timeouts, and logging defaults
+for production-style deployment with Uvicorn workers.
+"""
 
 import multiprocessing
 

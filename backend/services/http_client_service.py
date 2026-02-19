@@ -17,10 +17,14 @@ _shared_client: Optional[httpx.Client] = None
 
 def get_shared_http_client() -> httpx.Client:
     """
-    Get or create a shared HTTP client with large connection pool
-    
-    This client is reused across all Azure service instances to prevent
-    connection exhaustion under high load.
+    Get or create the singleton shared HTTP client.
+
+    Returns:
+        httpx.Client: Reusable HTTP client configured with connection pooling,
+        HTTP/2 support, and conservative timeout defaults for Azure/OpenAI calls.
+
+    This client is reused across all service instances to reduce socket churn
+    and prevent connection exhaustion during concurrent workloads.
     """
     global _shared_client
     
@@ -40,7 +44,7 @@ def get_shared_http_client() -> httpx.Client:
 
 
 def close_shared_http_client():
-    """Close the shared HTTP client on application shutdown"""
+    """Close and reset the shared HTTP client during application shutdown."""
     global _shared_client
     if _shared_client:
         _shared_client.close()

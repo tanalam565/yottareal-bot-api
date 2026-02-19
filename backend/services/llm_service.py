@@ -17,10 +17,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from services.redis_service import get_redis_client
 from services.http_client_service import get_shared_http_client
 
-logger = logging.getLogger(__name__)
-
 
 class LLMService:
+    """Build prompts, call Azure OpenAI, and return citation-aware responses."""
+
     def __init__(self):
         """Initialize Azure OpenAI chat client with shared HTTP pooling."""
         # Use shared HTTP client for connection pooling
@@ -31,21 +31,22 @@ class LLMService:
             http_client=get_shared_http_client()  # ← SHARED POOL
         )
         self.model = config.AZURE_OPENAI_DEPLOYMENT_NAME
+        self.logger = logging.getLogger(__name__)
 
     # ── Redis history helpers ─────────────────────────────────────────────────────
 
     async def _load_history(self, session_id: str) -> list:
-        """Load conversation history from Redis"""
+        """Load prior conversation turns for a session from Redis."""
         try:
             redis_client = await get_redis_client()
             data = await redis_client.get(f"conv:{session_id}")
             return json.loads(data) if data else []
         except Exception as e:
-            logger.warning(f"Redis history load error: {e}")
+            self.logger.warning("Redis history load error: %s", e)
             return []
 
     async def _save_history(self, session_id: str, history: list):
-        """Save conversation history to Redis with TTL, truncated to MAX_CONVERSATION_TURNS"""
+        """Save bounded conversation history for a session with configured TTL."""
         try:
             if len(history) > config.MAX_CONVERSATION_TURNS:
                 history = history[-config.MAX_CONVERSATION_TURNS:]
@@ -56,11 +57,20 @@ class LLMService:
                 json.dumps(history)
             )
         except Exception as e:
-            logger.warning(f"Redis history save error: {e}")
+            self.logger.warning("Redis history save error: %s", e)
 
     # ── Prompt builders (unchanged) ───────────────────────────────────────────────
 
     def _build_system_prompt(self, has_uploads: bool = False) -> str:
+        """
+        Build the system instruction prompt for the chat completion request.
+
+        Args:
+            has_uploads: Whether user-uploaded documents are present in context.
+
+        Returns:
+            str: Instruction prompt defining style, citation, and grounding rules.
+        """
         base_prompt = """You are an AI assistant for YottaReal property management software, helping leasing agents, property managers, and district managers retrieve information.
 
 Your role:
@@ -116,6 +126,12 @@ SOURCE ATTRIBUTION:
         return base_prompt
 
     def _build_prompt(self, query: str, context: List[Dict], has_uploads: bool = False) -> tuple:
+        """
+        Build user-facing prompt and document mapping for citation renumbering.
+
+        Returns:
+            tuple[str, dict]: Full prompt text and internal document map.
+        """
         uploaded_docs = [doc for doc in context if doc.get("source_type") == "uploaded"]
         company_docs = [doc for doc in context if doc.get("source_type") == "company"]
 
@@ -173,6 +189,16 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         return prompt, doc_mapping
 
     def _extract_citations_and_renumber(self, response_text: str, doc_mapping: Dict) -> tuple:
+        """
+        Normalize citation numbering in the model response and build source metadata.
+
+        Args:
+            response_text: Raw model response containing citations.
+            doc_mapping: Mapping of original context doc numbers to metadata.
+
+        Returns:
+            tuple[str, list]: Updated response text and normalized source list.
+        """
         citation_pattern = r'\[(\d+)(?:\s*→\s*Page\s*(\d+))?\]'
         matches = re.finditer(citation_pattern, response_text)
 
@@ -208,6 +234,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
                 renumber_map[old_num] = info["new_num"]
 
         def replace_citation(match):
+            """Map old citation ids to deduplicated citation ids while preserving page refs."""
             old_num = int(match.group(1))
             page_num = match.group(2)
             if old_num in renumber_map:
@@ -233,6 +260,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         return updated_text, sources
 
     def _clean_response(self, response_text: str) -> str:
+        """Remove undesired markdown formatting and trim response text."""
         cleaned = re.sub(r'\*\*', '', response_text)
         return cleaned.strip()
 
@@ -244,7 +272,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         stop=stop_after_attempt(3)
     )
     def _call_openai_sync(self, messages: list) -> str:
-        """Synchronous OpenAI call with retry on rate limit / connection errors"""
+        """Execute synchronous chat completion call with retry-enabled wrapper."""
         response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -260,6 +288,12 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         user_prompt: str,
         history: list
     ) -> str:
+        """
+        Build message sequence and execute Azure OpenAI chat completion.
+
+        Returns:
+            str: Assistant response content.
+        """
         messages = [{"role": "system", "content": system_prompt}]
 
         for msg in history:
@@ -268,7 +302,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
 
         messages.append({"role": "user", "content": user_prompt})
 
-        logger.info(f"Including {len(history)} previous exchanges in context")
+        self.logger.info("Including %s previous exchanges in context", len(history))
 
         # Run sync OpenAI call off the event loop
         return await asyncio.to_thread(self._call_openai_sync, messages)
@@ -283,6 +317,15 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         has_uploads: bool = False,
         is_comparison: bool = False
     ) -> Dict:
+        """
+        Generate a citation-aware answer for a user query.
+
+        This method orchestrates history loading, prompt construction, model
+        inference, citation normalization, and history persistence.
+
+        Returns:
+            Dict: Response payload containing `answer`, `sources`, and `session_id`.
+        """
         if not session_id:
             session_id = str(uuid.uuid4())
 
@@ -297,8 +340,13 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         uploaded_chars = sum(len(doc['content']) for doc in context if doc.get('source_type') == 'uploaded')
         company_chars = sum(min(len(doc['content']), 10000) for doc in context if doc.get('source_type') == 'company')
 
-        logger.info(f"Prompt stats: total_chars={total_chars:,}, est_tokens={estimated_tokens:,}, uploaded_chars={uploaded_chars:,}, company_chars={company_chars:,}")
-        logger.debug(f"Context usage: {(estimated_tokens/128000)*100:.1f}% with documents={len(doc_mapping)} and history_turns={len(history)}/{config.MAX_CONVERSATION_TURNS}")
+        self.logger.info(
+            "Prompt stats: total_chars=%s, est_tokens=%s, uploaded_chars=%s, company_chars=%s",
+            f"{total_chars:,}",
+            f"{estimated_tokens:,}",
+            f"{uploaded_chars:,}",
+            f"{company_chars:,}",
+        )
 
         try:
             response = await self._generate_azure_openai(system_prompt, user_prompt, history)
@@ -306,12 +354,13 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
             cleaned_response = self._clean_response(response)
             updated_response, sources = self._extract_citations_and_renumber(cleaned_response, doc_mapping)
 
-            logger.info(f"Generated response with inline citations; documents_provided={len(doc_mapping)}, unique_cited={len(sources)}")
-            if sources:
-                for src in sources:
-                    logger.debug(f"[{src['citation_number']}] {src['filename']}")
-            else:
-                logger.warning("No documents cited")
+            self.logger.info(
+                "Generated response with inline citations; documents_provided=%s, unique_cited=%s",
+                len(doc_mapping),
+                len(sources),
+            )
+            if not sources:
+                self.logger.warning("No documents cited")
 
             # Save updated history to Redis (auto-truncates to MAX_CONVERSATION_TURNS)
             history.append({"query": query, "response": updated_response})
@@ -324,7 +373,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
             }
 
         except Exception as e:
-            logger.exception(f"LLM generation error: {e}")
+            self.logger.exception("LLM generation error: %s", e)
             return {
                 "answer": "I apologize, but I encountered an error processing your request.",
                 "sources": [],

@@ -1,8 +1,10 @@
 """
-Azure Cognitive Search service.
+Service class for interacting with Azure Cognitive Search.
 
-Provides hybrid retrieval (keyword + vector) with per-document chunk limits,
-fallback keyword retrieval, and indexer control endpoints.
+This class provides methods to perform hybrid searches (keyword + vector) on indexed documents,
+manage search indexers, and handle document retrieval with per-document chunk limiting.
+It integrates with Azure Blob Storage for document downloads and uses embedding services
+for vector queries.
 """
 
 from azure.search.documents import SearchClient
@@ -19,12 +21,20 @@ import config
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from services.embedding_service import EmbeddingService
 
-logger = logging.getLogger(__name__)
-
 
 class AzureSearchService:
+    """Coordinate hybrid retrieval, metadata shaping, and indexer operations."""
+
     def __init__(self):
-        """Initialize Azure Search clients and dependent services."""
+        """
+        Initialize the Azure Search service clients and dependencies.
+
+        Sets up:
+        - Search client for document retrieval
+        - Indexer client for indexing operations
+        - Embedding service for vector queries
+        - Blob service for download URL generation
+        """
         self.endpoint = config.AZURE_SEARCH_ENDPOINT
         self.key = config.AZURE_SEARCH_KEY
         self.index_name = config.AZURE_SEARCH_INDEX_NAME
@@ -45,12 +55,20 @@ class AzureSearchService:
 
         self.embedding_service = EmbeddingService()
         self.blob_service = BlobService()
+        self.logger = logging.getLogger(__name__)
 
-        logger.info(f"Connected to index: {self.index_name} (hybrid search enabled)")
-        logger.info(f"Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
+        self.logger.info("Connected to index: %s (Hybrid Search enabled)", self.index_name)
+        self.logger.info("Max chunks per document: %s", config.MAX_CHUNKS_PER_DOCUMENT)
 
     def _extract_filename(self, result_dict: dict) -> str:
-        """Extract filename from search result - handle parent docs and chunks"""
+        """
+        Extract a human-readable filename from a search result payload.
+
+        Attempts title, filepath, and parent_id path extraction in order.
+
+        Returns:
+            str: Best-effort filename, or ``"Unknown Document"`` when missing.
+        """
         title = result_dict.get("title")
         if title and title.strip():
             return title
@@ -82,7 +100,7 @@ class AzureSearchService:
         stop=stop_after_attempt(3)
     )
     def _execute_search_sync(self, query: str, vector_query, top: int) -> list:
-        """Execute hybrid search synchronously and return consumed list of dicts"""
+        """Execute synchronous hybrid search and return materialized result dictionaries."""
         results = self.search_client.search(
             search_text=query,
             vector_queries=[vector_query],
@@ -97,7 +115,7 @@ class AzureSearchService:
         stop=stop_after_attempt(3)
     )
     def _execute_keyword_search_sync(self, query: str, top: int) -> list:
-        """Execute keyword-only search synchronously"""
+        """Execute synchronous keyword-only search and return result dictionaries."""
         results = self.search_client.search(
             search_text=query,
             top=top * 3,
@@ -106,21 +124,34 @@ class AzureSearchService:
         return [dict(r) for r in results]
 
     def _get_indexer_status_sync(self):
+        """Fetch current indexer status synchronously via Azure SDK client."""
         return self.indexer_client.get_indexer_status(self.indexer_name)
 
     def _run_indexer_sync(self):
+        """Trigger Azure Search indexer run synchronously."""
         self.indexer_client.run_indexer(self.indexer_name)
 
     # ── Async public methods ──────────────────────────────────────────────────────
 
     async def search(self, query: str, top: int = config.MAX_SEARCH_RESULTS) -> List[Dict]:
         """
-        Perform hybrid search (keyword + vector) on indexed documents
-        with per-document chunk limiting to avoid one document dominating results
+        Perform hybrid search (keyword + vector) with per-document chunk limiting.
+
+        Workflow:
+        1. Generate query embedding
+        2. Execute hybrid Azure Search query
+        3. Limit chunks per parent document
+        4. Attach source metadata/download URLs
+
+        Args:
+            query: User query text.
+            top: Maximum number of chunks to return.
+
+        Returns:
+            List[Dict]: Ranked chunk payloads for LLM context.
         """
         try:
-            logger.info(f"Hybrid search for query='{query}' target_results={top}")
-            logger.debug(f"Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
+            self.logger.info("Hybrid search for query='%s' target_results=%s", query, top)
 
             # Generate query embedding off the event loop
             query_embedding = await asyncio.to_thread(
@@ -141,8 +172,6 @@ class AzureSearchService:
             # Group chunks by parent_id and limit per document
             parent_chunks = {}
             processed_results = []
-
-            logger.debug("Processing search results with per-document limiting")
 
             for result_dict in raw_results:
                 parent_id = result_dict.get("parent_id")
@@ -174,7 +203,7 @@ class AzureSearchService:
                     try:
                         download_url = self.blob_service.generate_download_url(blob_name)
                     except Exception as e:
-                        logger.warning(f"Error generating download URL for {blob_name}: {e}")
+                        self.logger.warning("Error generating download URL for %s: %s", blob_name, e)
 
                 chunk_data = {
                     "content": str(content)[:5000],
@@ -193,25 +222,27 @@ class AzureSearchService:
                 if len(processed_results) >= top:
                     break
 
-            logger.info(f"Retrieval stats: unique_documents={len(parent_chunks)}, chunks_retrieved={len(processed_results)}")
-
-            logger.debug("Chunks per document")
-            for parent_id, data in parent_chunks.items():
-                filename = data['filename']
-                count = data['count']
-                status = "⚠️ LIMITED" if count >= config.MAX_CHUNKS_PER_DOCUMENT else "✓"
-                logger.debug(f"{status} {filename}: {count} chunks")
+            self.logger.info(
+                "Retrieval stats: unique_documents=%s, chunks_retrieved=%s",
+                len(parent_chunks),
+                len(processed_results),
+            )
 
             return processed_results[:top]
 
         except Exception as e:
-            logger.exception(f"Hybrid search error: {e}")
+            self.logger.exception("Hybrid search error: %s", e)
             return await self._fallback_keyword_search(query, top)
 
     async def _fallback_keyword_search(self, query: str, top: int) -> List[Dict]:
-        """Fallback to keyword-only search if hybrid search fails"""
+        """
+        Fallback keyword-only retrieval path used when hybrid search fails.
+
+        Returns:
+            List[Dict]: Best-effort chunk list without vector ranking.
+        """
         try:
-            logger.warning("Falling back to keyword-only search")
+            self.logger.warning("Falling back to keyword-only search")
 
             raw_results = await asyncio.to_thread(
                 self._execute_keyword_search_sync, query, top
@@ -258,15 +289,19 @@ class AzureSearchService:
                 if len(search_results) >= top:
                     break
 
-            logger.info(f"Keyword fallback returned {len(search_results)} results from {len(parent_chunks)} documents")
+            self.logger.info(
+                "Keyword fallback returned %s results from %s documents",
+                len(search_results),
+                len(parent_chunks),
+            )
             return search_results
 
         except Exception as e:
-            logger.exception(f"Fallback search error: {e}")
+            self.logger.exception("Fallback search error: %s", e)
             return []
 
     async def get_indexer_status(self):
-        """Get status of the Azure Search indexer"""
+        """Get current Azure Search indexer status and latest execution result details."""
         try:
             status = await asyncio.to_thread(self._get_indexer_status_sync)
             return {
@@ -278,15 +313,15 @@ class AzureSearchService:
                 }
             }
         except Exception as e:
-            logger.error(f"Error getting indexer status: {e}")
+            self.logger.error("Error getting indexer status: %s", e)
             return {"error": str(e)}
 
     async def run_indexer(self):
-        """Manually trigger the indexer to process new documents"""
+        """Manually trigger the configured Azure Search indexer run."""
         try:
             await asyncio.to_thread(self._run_indexer_sync)
-            logger.info(f"Indexer '{self.indexer_name}' triggered successfully")
+            self.logger.info("Indexer '%s' triggered successfully", self.indexer_name)
             return True
         except Exception as e:
-            logger.error(f"Error running indexer: {e}")
+            self.logger.error("Error running indexer: %s", e)
             return False

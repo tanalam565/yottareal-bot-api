@@ -11,18 +11,28 @@ import urllib.parse
 import logging
 import config
 
-logger = logging.getLogger(__name__)
-
 class BlobService:
+    """Generate secure, time-limited download URLs for blob documents."""
+
     def __init__(self):
-        """Initialize Blob service client from configured connection string."""
+        """Initialize Azure Blob service client using configured connection details."""
         self.blob_service_client = BlobServiceClient.from_connection_string(
             config.AZURE_STORAGE_CONNECTION_STRING
         )
         self.container_name = config.AZURE_STORAGE_CONTAINER_NAME
+        self.logger = logging.getLogger(__name__)
     
     def generate_download_url(self, blob_name: str, expiry_hours: int = 1) -> str:
-        """Generate a temporary download URL (SAS token) for a blob"""
+        """
+        Generate a time-limited SAS URL for downloading a blob.
+
+        Args:
+            blob_name: Blob filename/path in the configured container.
+            expiry_hours: SAS token validity duration in hours.
+
+        Returns:
+            str | None: Download URL if generated successfully, otherwise None.
+        """
         try:
             # URL decode the blob name first (Azure stores with + as space)
             blob_name = urllib.parse.unquote(blob_name)
@@ -60,5 +70,5 @@ class BlobService:
             return f"https://{account_name}.blob.core.windows.net/{self.container_name}/{encoded_blob_name}?{sas_token}"
             
         except Exception as e:
-            logger.error(f"Error generating download URL for {blob_name}: {e}")
+            self.logger.error("Error generating download URL for %s: %s", blob_name, e)
             return None

@@ -18,11 +18,16 @@ logger = logging.getLogger(__name__)
 
 
 def get_worker_count():
+    """Return recommended worker count using the standard `(2 * CPU) + 1` formula."""
     return multiprocessing.cpu_count() * 2 + 1
 
 
 def start_linux():
-    """Start with Gunicorn + Uvicorn workers (Linux/Mac)"""
+    """
+    Start API server using Gunicorn with Uvicorn workers on Linux/macOS.
+
+    Falls back to direct Uvicorn startup if Gunicorn is not installed.
+    """
     try:
         import gunicorn.app.base
     except ImportError:
@@ -40,7 +45,12 @@ def start_linux():
 
 
 def start_uvicorn():
-    """Start with Uvicorn directly (Windows/IIS or fallback)"""
+    """
+    Start API server with Uvicorn directly.
+
+    Used for Windows/IIS environments and as a fallback when Gunicorn
+    is unavailable.
+    """
     workers = get_worker_count()
     host = os.getenv("APP_HOST", "0.0.0.0")
     port = os.getenv("APP_PORT", "8000")

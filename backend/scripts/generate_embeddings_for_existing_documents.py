@@ -309,12 +309,6 @@ async def generate_embeddings_from_blob_storage():
             total_chars = sum(len(p["text"]) for p in page_texts)
             logger.info("Document stats: %d chars, %d pages, created %d chunks", total_chars, page_count, len(chunks))
 
-            # Show sample chunk-to-page mapping
-            if chunks:
-                sample_size = min(3, len(chunks))
-                for i in range(sample_size):
-                    logger.debug("Sample mapping: Chunk %d → Page %d", chunks[i]['chunk_number'], chunks[i]['page_number'])
-
             # Process each chunk
             for chunk_info in chunks:
                 chunk_content = chunk_info["text"]

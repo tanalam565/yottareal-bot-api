@@ -1,12 +1,19 @@
 """
-Configuration module for the YottaReal Bot API.
+Central configuration for the YottaReal Bot API.
 
-This module centralizes all environment-driven settings used by backend services,
-including Azure integrations, Redis session/history behavior, upload limits,
-rate limiting, and CORS settings.
+This module is the single source of truth for runtime settings loaded from
+environment variables. Values are grouped by concern so all services use
+consistent settings for:
 
-All values provide development-safe defaults, but production deployments should
-define environment variables explicitly.
+- Azure Blob Storage and Search
+- Azure OpenAI chat and embedding deployments
+- Azure Document Intelligence extraction
+- Redis sessions/history
+- Upload limits, rate limiting, and request timeouts
+- CORS behavior for frontend access
+
+Most values include development-friendly defaults. Production deployments
+should provide explicit environment variables for all sensitive settings.
 """
 
 import os
@@ -75,6 +82,4 @@ RATE_LIMIT_UPLOAD = os.getenv("RATE_LIMIT_UPLOAD", "5/minute")
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 
 # CORS - comma-separated list of allowed origins
-CORS_ALLOWED_ORIGINS = os.getenv(
-    "CORS_ALLOWED_ORIGINS","http://localhost:3000,https://fluffy-spoon-pj7rwgw4566xc7477-3000.app.github.dev"
-).split(",")
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
