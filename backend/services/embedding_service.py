@@ -1,14 +1,23 @@
-# backend/services/embedding_service.py - WITH CONNECTION POOLING
+"""
+Embedding service backed by Azure OpenAI.
+
+Creates query/document embeddings with retry handling and shared HTTP
+connection pooling.
+"""
 
 from openai import AzureOpenAI, RateLimitError, APIConnectionError
 from typing import List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import logging
 import config
 from services.http_client_service import get_shared_http_client
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingService:
     def __init__(self):
+        """Initialize embedding client and model configuration."""
         # Use shared HTTP client for connection pooling
         self.client = AzureOpenAI(
             api_version=config.AZURE_OPENAI_EMBEDDING_API_VERSION,
@@ -20,10 +29,7 @@ class EmbeddingService:
         self.model = config.AZURE_OPENAI_EMBEDDING_MODEL
         self.dimensions = config.EMBEDDING_DIMENSIONS
 
-        print(f"✓ Embedding service initialized:")
-        print(f"  Model: {self.model}")
-        print(f"  Deployment: {self.deployment}")
-        print(f"  Dimensions: {self.dimensions}")
+        logger.info(f"Embedding service initialized: model={self.model}, deployment={self.deployment}, dimensions={self.dimensions}")
 
     @retry(
         retry=retry_if_exception_type((RateLimitError, APIConnectionError)),
@@ -51,12 +57,12 @@ class EmbeddingService:
             embedding = self._generate_with_retry(text)
 
             if len(embedding) != self.dimensions:
-                print(f"  ⚠️  Warning: Expected {self.dimensions} dimensions, got {len(embedding)}")
+                logger.warning(f"Expected {self.dimensions} dimensions, got {len(embedding)}")
 
             return embedding
 
         except Exception as e:
-            print(f"❌ Error generating embedding after retries: {e}")
+            logger.error(f"Error generating embedding after retries: {e}")
             return [0.0] * self.dimensions
 
     def generate_embeddings_batch(self, texts: List[str], batch_size: int = 16) -> List[List[float]]:
@@ -71,7 +77,7 @@ class EmbeddingService:
                 batch = texts[i:i + batch_size]
                 truncated_batch = [text[:32000] if len(text) > 32000 else text for text in batch]
 
-                print(f"  Processing batch {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1}...")
+                logger.debug(f"Processing embedding batch {i//batch_size + 1}/{(len(texts)-1)//batch_size + 1}")
 
                 response = self.client.embeddings.create(
                     input=truncated_batch,
@@ -85,5 +91,5 @@ class EmbeddingService:
             return all_embeddings
 
         except Exception as e:
-            print(f"❌ Error generating batch embeddings: {e}")
+            logger.error(f"Error generating batch embeddings: {e}")
             return [[0.0] * self.dimensions for _ in texts]

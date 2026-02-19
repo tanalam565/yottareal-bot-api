@@ -1,10 +1,21 @@
+"""
+Azure Blob Storage helper service.
+
+Generates short-lived SAS download URLs for indexed blob files so the frontend
+can provide secure, time-limited document access.
+"""
+
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from datetime import datetime, timedelta
 import urllib.parse
+import logging
 import config
+
+logger = logging.getLogger(__name__)
 
 class BlobService:
     def __init__(self):
+        """Initialize Blob service client from configured connection string."""
         self.blob_service_client = BlobServiceClient.from_connection_string(
             config.AZURE_STORAGE_CONNECTION_STRING
         )
@@ -49,5 +60,5 @@ class BlobService:
             return f"https://{account_name}.blob.core.windows.net/{self.container_name}/{encoded_blob_name}?{sas_token}"
             
         except Exception as e:
-            print(f"❌ Error generating download URL for {blob_name}: {e}")
+            logger.error(f"Error generating download URL for {blob_name}: {e}")
             return None

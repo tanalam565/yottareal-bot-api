@@ -1,8 +1,15 @@
-# backend/services/http_client_service.py
-# Shared HTTP client with connection pooling for all Azure services
+"""
+Shared HTTP client service for Azure SDK/OpenAI calls.
+
+Provides a singleton `httpx.Client` with connection pooling to reduce socket
+churn and improve throughput under concurrent request load.
+"""
 
 import httpx
 from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Global shared client
 _shared_client: Optional[httpx.Client] = None
@@ -27,7 +34,7 @@ def get_shared_http_client() -> httpx.Client:
             ),
             http2=True  # Enable HTTP/2 for better performance
         )
-        print("✓ Shared HTTP client created with connection pool (500 max connections)")
+        logger.info("Shared HTTP client created with connection pool (max_connections=500)")
     
     return _shared_client
 
@@ -38,4 +45,4 @@ def close_shared_http_client():
     if _shared_client:
         _shared_client.close()
         _shared_client = None
-        print("✓ Shared HTTP client closed")
+        logger.info("Shared HTTP client closed")

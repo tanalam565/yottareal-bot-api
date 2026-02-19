@@ -1,15 +1,24 @@
-# backend/services/document_intelligence_service.py
+"""
+Azure Document Intelligence extraction service.
+
+Supports text extraction for PDFs/images/DOCX via Azure Document Intelligence and
+direct UTF-8 parsing for plain text uploads.
+"""
 
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
 from azure.core.credentials import AzureKeyCredential
 import base64
 import asyncio
+import logging
 import config
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentIntelligenceService:
     def __init__(self):
+        """Initialize Document Intelligence client with configured credentials."""
         self.endpoint = config.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT
         self.key = config.AZURE_DOCUMENT_INTELLIGENCE_KEY
         self.client = DocumentIntelligenceClient(
@@ -36,7 +45,7 @@ class DocumentIntelligenceService:
             if hasattr(result, 'pages'):
                 for page in result.pages:
                     if page.page_number > config.MAX_UPLOAD_PAGES:
-                        print(f"   ⚠️  Stopping at page {config.MAX_UPLOAD_PAGES} (MAX_UPLOAD_PAGES limit)")
+                        logger.warning(f"Stopping at page {config.MAX_UPLOAD_PAGES} (MAX_UPLOAD_PAGES limit)")
                         break
                     page_num = page.page_number
                     page_content = ""
@@ -59,7 +68,7 @@ class DocumentIntelligenceService:
             }
 
         except Exception as e:
-            print(f"Error extracting text from {filename}: {e}")
+            logger.error(f"Error extracting text from {filename}: {e}")
             return {
                 "text": "",
                 "page_texts": [],
@@ -70,7 +79,12 @@ class DocumentIntelligenceService:
             }
 
     async def extract_text(self, file_content: bytes, filename: str) -> dict:
-        """Extract text from file - handles .txt directly, others via Document Intelligence"""
+        """
+        Extract text content from uploaded file bytes.
+
+        Handles `.txt` directly and routes binary office/image/PDF formats to
+        Azure Document Intelligence.
+        """
         
         # Handle plain text files directly without Document Intelligence
         if filename.lower().endswith('.txt'):
@@ -85,7 +99,7 @@ class DocumentIntelligenceService:
                 for i in range(0, len(text), page_size):
                     page_content = text[i:i + page_size]
                     if page_num > config.MAX_UPLOAD_PAGES:
-                        print(f"   ⚠️  Stopping at page {config.MAX_UPLOAD_PAGES} (MAX_UPLOAD_PAGES limit)")
+                        logger.warning(f"Stopping at page {config.MAX_UPLOAD_PAGES} (MAX_UPLOAD_PAGES limit)")
                         break
                     page_texts.append({
                         "page_number": page_num,
@@ -93,7 +107,7 @@ class DocumentIntelligenceService:
                     })
                     page_num += 1
                 
-                print(f"   ✅ Extracted {len(text)} characters from {len(page_texts)} pages (plain text)")
+                logger.info(f"Extracted {len(text)} characters from {len(page_texts)} pages (plain text)")
                 
                 return {
                     "text": text.strip(),
@@ -103,7 +117,7 @@ class DocumentIntelligenceService:
                     "success": True
                 }
             except UnicodeDecodeError as e:
-                print(f"Error decoding text file {filename}: {e}")
+                logger.error(f"Error decoding text file {filename}: {e}")
                 return {
                     "text": "",
                     "page_texts": [],
@@ -120,7 +134,7 @@ class DocumentIntelligenceService:
                 timeout=config.REQUEST_TIMEOUT_SECONDS
             )
         except asyncio.TimeoutError:
-            print(f"⏰ Document Intelligence timed out for {filename} after {config.REQUEST_TIMEOUT_SECONDS}s")
+            logger.error(f"Document Intelligence timed out for {filename} after {config.REQUEST_TIMEOUT_SECONDS}s")
             return {
                 "text": "",
                 "page_texts": [],

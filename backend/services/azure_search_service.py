@@ -1,3 +1,10 @@
+"""
+Azure Cognitive Search service.
+
+Provides hybrid retrieval (keyword + vector) with per-document chunk limits,
+fallback keyword retrieval, and indexer control endpoints.
+"""
+
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexerClient
 from azure.search.documents.models import VectorizedQuery
@@ -7,13 +14,17 @@ from services.blob_service import BlobService
 from typing import List, Dict
 import urllib.parse
 import asyncio
+import logging
 import config
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from services.embedding_service import EmbeddingService
 
+logger = logging.getLogger(__name__)
+
 
 class AzureSearchService:
     def __init__(self):
+        """Initialize Azure Search clients and dependent services."""
         self.endpoint = config.AZURE_SEARCH_ENDPOINT
         self.key = config.AZURE_SEARCH_KEY
         self.index_name = config.AZURE_SEARCH_INDEX_NAME
@@ -35,8 +46,8 @@ class AzureSearchService:
         self.embedding_service = EmbeddingService()
         self.blob_service = BlobService()
 
-        print(f"✓ Connected to index: {self.index_name} (Hybrid Search enabled)")
-        print(f"✓ Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
+        logger.info(f"Connected to index: {self.index_name} (hybrid search enabled)")
+        logger.info(f"Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
 
     def _extract_filename(self, result_dict: dict) -> str:
         """Extract filename from search result - handle parent docs and chunks"""
@@ -108,11 +119,8 @@ class AzureSearchService:
         with per-document chunk limiting to avoid one document dominating results
         """
         try:
-            print(f"\n{'='*70}")
-            print(f"🔍 Hybrid search for: '{query}'")
-            print(f"📊 Target results: {top}")
-            print(f"📄 Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
-            print(f"{'='*70}")
+            logger.info(f"Hybrid search for query='{query}' target_results={top}")
+            logger.debug(f"Max chunks per document: {config.MAX_CHUNKS_PER_DOCUMENT}")
 
             # Generate query embedding off the event loop
             query_embedding = await asyncio.to_thread(
@@ -134,7 +142,7 @@ class AzureSearchService:
             parent_chunks = {}
             processed_results = []
 
-            print(f"\n📥 Processing search results with per-document limiting...")
+            logger.debug("Processing search results with per-document limiting")
 
             for result_dict in raw_results:
                 parent_id = result_dict.get("parent_id")
@@ -166,7 +174,7 @@ class AzureSearchService:
                     try:
                         download_url = self.blob_service.generate_download_url(blob_name)
                     except Exception as e:
-                        print(f"   ⚠️  Error generating download URL for {blob_name}: {e}")
+                        logger.warning(f"Error generating download URL for {blob_name}: {e}")
 
                 chunk_data = {
                     "content": str(content)[:5000],
@@ -185,31 +193,25 @@ class AzureSearchService:
                 if len(processed_results) >= top:
                     break
 
-            print(f"\n📊 Retrieval Statistics:")
-            print(f"   ✓ Total unique documents: {len(parent_chunks)}")
-            print(f"   ✓ Total chunks retrieved: {len(processed_results)}")
+            logger.info(f"Retrieval stats: unique_documents={len(parent_chunks)}, chunks_retrieved={len(processed_results)}")
 
-            print(f"\n📄 Chunks per document:")
+            logger.debug("Chunks per document")
             for parent_id, data in parent_chunks.items():
                 filename = data['filename']
                 count = data['count']
                 status = "⚠️ LIMITED" if count >= config.MAX_CHUNKS_PER_DOCUMENT else "✓"
-                print(f"   {status} {filename}: {count} chunks")
-
-            print(f"{'='*70}\n")
+                logger.debug(f"{status} {filename}: {count} chunks")
 
             return processed_results[:top]
 
         except Exception as e:
-            print(f"❌ Hybrid search error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"Hybrid search error: {e}")
             return await self._fallback_keyword_search(query, top)
 
     async def _fallback_keyword_search(self, query: str, top: int) -> List[Dict]:
         """Fallback to keyword-only search if hybrid search fails"""
         try:
-            print(f"\n⚠️  Falling back to keyword-only search")
+            logger.warning("Falling back to keyword-only search")
 
             raw_results = await asyncio.to_thread(
                 self._execute_keyword_search_sync, query, top
@@ -256,11 +258,11 @@ class AzureSearchService:
                 if len(search_results) >= top:
                     break
 
-            print(f"✓ Keyword search returned {len(search_results)} results from {len(parent_chunks)} documents")
+            logger.info(f"Keyword fallback returned {len(search_results)} results from {len(parent_chunks)} documents")
             return search_results
 
         except Exception as e:
-            print(f"❌ Fallback search error: {e}")
+            logger.exception(f"Fallback search error: {e}")
             return []
 
     async def get_indexer_status(self):
@@ -276,15 +278,15 @@ class AzureSearchService:
                 }
             }
         except Exception as e:
-            print(f"Error getting indexer status: {e}")
+            logger.error(f"Error getting indexer status: {e}")
             return {"error": str(e)}
 
     async def run_indexer(self):
         """Manually trigger the indexer to process new documents"""
         try:
             await asyncio.to_thread(self._run_indexer_sync)
-            print(f"✓ Indexer '{self.indexer_name}' triggered successfully")
+            logger.info(f"Indexer '{self.indexer_name}' triggered successfully")
             return True
         except Exception as e:
-            print(f"❌ Error running indexer: {e}")
+            logger.error(f"Error running indexer: {e}")
             return False

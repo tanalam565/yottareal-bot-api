@@ -1,4 +1,9 @@
-# backend/services/llm_service.py - WITH CONNECTION POOLING
+"""
+LLM response generation service.
+
+Builds prompts from indexed/uploaded context, manages Redis-backed conversation
+history, and returns citation-aware answers from Azure OpenAI.
+"""
 
 from typing import List, Dict, Optional
 from openai import AzureOpenAI, RateLimitError, APIConnectionError
@@ -6,14 +11,18 @@ import uuid
 import re
 import json
 import asyncio
+import logging
 import config
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from services.redis_service import get_redis_client
 from services.http_client_service import get_shared_http_client
 
+logger = logging.getLogger(__name__)
+
 
 class LLMService:
     def __init__(self):
+        """Initialize Azure OpenAI chat client with shared HTTP pooling."""
         # Use shared HTTP client for connection pooling
         self.client = AzureOpenAI(
             api_key=config.AZURE_OPENAI_API_KEY,
@@ -32,7 +41,7 @@ class LLMService:
             data = await redis_client.get(f"conv:{session_id}")
             return json.loads(data) if data else []
         except Exception as e:
-            print(f"⚠️  Redis history load error: {e}")
+            logger.warning(f"Redis history load error: {e}")
             return []
 
     async def _save_history(self, session_id: str, history: list):
@@ -47,7 +56,7 @@ class LLMService:
                 json.dumps(history)
             )
         except Exception as e:
-            print(f"⚠️  Redis history save error: {e}")
+            logger.warning(f"Redis history save error: {e}")
 
     # ── Prompt builders (unchanged) ───────────────────────────────────────────────
 
@@ -259,7 +268,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
 
         messages.append({"role": "user", "content": user_prompt})
 
-        print(f"📝 Including {len(history)} previous exchanges in context")
+        logger.info(f"Including {len(history)} previous exchanges in context")
 
         # Run sync OpenAI call off the event loop
         return await asyncio.to_thread(self._call_openai_sync, messages)
@@ -288,14 +297,8 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         uploaded_chars = sum(len(doc['content']) for doc in context if doc.get('source_type') == 'uploaded')
         company_chars = sum(min(len(doc['content']), 10000) for doc in context if doc.get('source_type') == 'company')
 
-        print(f"📊 Prompt Statistics:")
-        print(f"   Total prompt: {total_chars:,} chars (~{estimated_tokens:,} tokens)")
-        print(f"   Uploaded content: {uploaded_chars:,} chars (FULL, no truncation)")
-        print(f"   Company content: {company_chars:,} chars")
-        print(f"   Context window available: ~128,000 tokens")
-        print(f"   Usage: {(estimated_tokens/128000)*100:.1f}%")
-        print(f"   Documents provided: {len(doc_mapping)}")
-        print(f"   History turns: {len(history)}/{config.MAX_CONVERSATION_TURNS}")
+        logger.info(f"Prompt stats: total_chars={total_chars:,}, est_tokens={estimated_tokens:,}, uploaded_chars={uploaded_chars:,}, company_chars={company_chars:,}")
+        logger.debug(f"Context usage: {(estimated_tokens/128000)*100:.1f}% with documents={len(doc_mapping)} and history_turns={len(history)}/{config.MAX_CONVERSATION_TURNS}")
 
         try:
             response = await self._generate_azure_openai(system_prompt, user_prompt, history)
@@ -303,14 +306,12 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
             cleaned_response = self._clean_response(response)
             updated_response, sources = self._extract_citations_and_renumber(cleaned_response, doc_mapping)
 
-            print(f"✅ Generated response with inline citations")
-            print(f"   Documents provided: {len(doc_mapping)}")
-            print(f"   Unique documents cited: {len(sources)}")
+            logger.info(f"Generated response with inline citations; documents_provided={len(doc_mapping)}, unique_cited={len(sources)}")
             if sources:
                 for src in sources:
-                    print(f"     [{src['citation_number']}] {src['filename']}")
+                    logger.debug(f"[{src['citation_number']}] {src['filename']}")
             else:
-                print(f"   ⚠️  No documents cited")
+                logger.warning("No documents cited")
 
             # Save updated history to Redis (auto-truncates to MAX_CONVERSATION_TURNS)
             history.append({"query": query, "response": updated_response})
@@ -323,9 +324,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
             }
 
         except Exception as e:
-            print(f"❌ LLM generation error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"LLM generation error: {e}")
             return {
                 "answer": "I apologize, but I encountered an error processing your request.",
                 "sources": [],

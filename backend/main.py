@@ -1,6 +1,7 @@
 # backend/main.py - WITH REDIS SESSIONS, RATE LIMITING, FILE VALIDATION
 
 from contextlib import asynccontextmanager
+import logging
 from fastapi import FastAPI, HTTPException, Security, Depends, UploadFile, File, Form, Request
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +20,33 @@ from services.llm_service import LLMService
 from services.document_intelligence_service import DocumentIntelligenceService
 from services.redis_service import get_redis_client, close_redis
 import config
+
+"""
+YottaReal Bot API - FastAPI Backend.
+
+Provides chat, upload, session cleanup, indexer controls, and health endpoints.
+The application integrates Azure Cognitive Search, Azure OpenAI, Azure Document
+Intelligence, and Redis-backed session/history state.
+"""
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Reduce noisy third-party logs while keeping app/service logs readable.
+for noisy_logger in [
+    "httpx",
+    "httpcore",
+    "azure",
+    "azure.core.pipeline.policies.http_logging_policy",
+    "urllib3",
+    "openai",
+    "gunicorn.access",
+    "uvicorn.access",
+]:
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 # ── File validation via magic bytes (not trusting content-type header) ──────────
 ALLOWED_SIGNATURES = [
@@ -90,7 +118,18 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 async def verify_api_key(api_key: str = Security(api_key_header)):
-    """Verify API key for authentication"""
+    """
+    Verify API key for authentication.
+
+    Args:
+        api_key: API key provided in `X-API-Key` header.
+
+    Returns:
+        bool: True if authentication succeeds.
+
+    Raises:
+        HTTPException: If key is missing/invalid when auth is enabled.
+    """
     if not config.CHATBOT_API_KEY:
         return True
     if api_key != config.CHATBOT_API_KEY:
@@ -99,29 +138,39 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
 
 
 class ChatRequest(BaseModel):
+    """Request model for chat endpoint."""
     message: str
     session_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
+    """Response model for chat endpoint."""
     response: str
     sources: List[dict]
     session_id: str
 
 
 class CleanupRequest(BaseModel):
+    """Request model for session cleanup endpoint."""
     session_id: str
 
 
 @app.post("/api/chat", response_model=ChatResponse)
 @limiter.limit(config.RATE_LIMIT_CHAT)
 async def chat(request: Request, body: ChatRequest, authenticated: bool = Depends(verify_api_key)):
+    """
+    Process chat messages with session uploads and indexed document retrieval.
+
+    Args:
+        request: FastAPI request (used by limiter middleware).
+        body: Chat request payload.
+        authenticated: Authentication dependency guard.
+
+    Returns:
+        ChatResponse: AI response with source citations and session id.
+    """
     try:
-        print(f"\n{'='*60}")
-        print(f"📨 Chat Request")
-        print(f"Session ID: {body.session_id}")
-        print(f"Query: {body.message}")
-        print(f"{'='*60}")
+        logger.info(f"Chat request - Session ID: {body.session_id}, Query: {body.message}")
 
         # ===== STEP 1: GET ALL UPLOADED DOCUMENTS FOR THIS SESSION (REDIS) =====
         session_context = []
@@ -153,15 +202,15 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
                         "page_number": 1
                     })
 
-            print(f"\n📤 UPLOADED DOCUMENTS IN SESSION: {len(session_docs)} files")
-            print(f"   Total pages across all uploads: {len(session_context)}")
+            logger.info(f"Uploaded documents in session: {len(session_docs)} files")
+            logger.debug(f"Total pages across all uploads: {len(session_context)}")
             for i, doc in enumerate(session_docs, 1):
                 page_count = len(doc.get('page_texts', [])) if 'page_texts' in doc else 1
                 content_preview = doc['content'][:100].replace('\n', ' ') if 'content' in doc else doc.get('page_texts', [{}])[0].get('text', '')[:100].replace('\n', ' ')
-                print(f"  {i}. {doc['filename']} ({page_count} pages)")
-                print(f"     Content preview: {content_preview}...")
+                logger.debug(f"{i}. {doc['filename']} ({page_count} pages)")
+                logger.debug(f"Content preview: {content_preview}...")
         else:
-            print(f"\n📤 No uploaded documents in this session")
+            logger.info("No uploaded documents in this session")
 
         # ===== STEP 2: CHECK IF CASUAL CHAT =====
         casual_patterns = [
@@ -183,49 +232,47 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
         elif len(query_lower.split()) == 1 and len(query_lower) <= 6:
             is_casual = True
 
-        print(f"\n💬 Query Type: {'Casual chat' if is_casual else 'Document query'}")
+        logger.info(f"Query type: {'Casual chat' if is_casual else 'Document query'}")
 
         # ===== STEP 3: SEARCH COMPANY DOCUMENTS =====
         indexed_results = []
         if not is_casual:
-            print(f"\n🔍 Searching company documents...")
+            logger.info("Searching company documents")
             indexed_results = await search_service.search(body.message)
             for doc in indexed_results:
                 doc["source_type"] = "company"
-            print(f"📁 Found {len(indexed_results)} company documents")
+            logger.info(f"Found {len(indexed_results)} company documents")
             for i, doc in enumerate(indexed_results, 1):
-                print(f"  {i}. {doc['filename']}")
+                logger.debug(f"{i}. {doc['filename']}")
         else:
-            print(f"\n🔍 Skipping document search (casual chat)")
+            logger.info("Skipping document search (casual chat)")
 
         # ===== STEP 4: BUILD CONTEXT FOR LLM =====
         all_context = []
 
         if is_casual:
             all_context = []
-            print(f"\n📋 CONTEXT FOR LLM: Empty (casual chat)")
+            logger.info("Context for LLM: Empty (casual chat)")
         elif session_context:
             all_context = session_context + indexed_results[:15]
-            print(f"\n📋 CONTEXT FOR LLM: {len(all_context)} document pages")
-            print(f"   - ALL {len(session_context)} uploaded pages")
-            print(f"   - Top {len(indexed_results[:15])} company documents")
+            logger.info(f"Context for LLM: {len(all_context)} document pages")
+            logger.debug(f"ALL {len(session_context)} uploaded pages")
+            logger.debug(f"Top {len(indexed_results[:15])} company documents")
         else:
             all_context = indexed_results[:15]
-            print(f"\n📋 CONTEXT FOR LLM: {len(all_context)} company documents")
+            logger.info(f"Context for LLM: {len(all_context)} company documents")
 
         # ===== STEP 5: LOG WHAT'S BEING SENT =====
-        print(f"\n📤 SENDING TO LLM ({len(all_context)} document pages):")
+        logger.info(f"Sending to LLM ({len(all_context)} document pages)")
         for i, doc in enumerate(all_context, 1):
             doc_type = doc.get('source_type', 'unknown')
             page_num = doc.get('page_number', 1)
             icon = "📤" if doc_type == "uploaded" else "📁"
-            print(f"  {i}. {icon} [{doc_type}] {doc['filename']} - Page {page_num}")
-            print(f"      Content length: {len(doc.get('content', ''))} chars")
+            logger.debug(f"{i}. {icon} [{doc_type}] {doc['filename']} - Page {page_num}")
+            logger.debug(f"Content length: {len(doc.get('content', ''))} chars")
 
         if not all_context and not is_casual:
-            print(f"  ⚠️  WARNING: No documents in context!")
-
-        print(f"{'='*60}\n")
+            logger.warning("No documents in context for non-casual query")
 
         # ===== STEP 6: GENERATE RESPONSE =====
         response = await llm_service.generate_response(
@@ -245,11 +292,11 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
 
         unique_sources = list(source_map.values())
 
-        print(f"\n📋 Sources after deduplication: {len(unique_sources)}")
+        logger.info(f"Sources after deduplication: {len(unique_sources)}")
         for i, src in enumerate(unique_sources, 1):
             source_type = src.get('source_type', 'unknown')
             icon = "📤" if source_type == "uploaded" else "📁"
-            print(f"  {i}. {icon} {src.get('filename', 'Unknown')}")
+            logger.debug(f"{i}. {icon} {src.get('filename', 'Unknown')}")
 
         return ChatResponse(
             response=response["answer"],
@@ -258,9 +305,7 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
         )
 
     except Exception as e:
-        print(f"❌ Chat error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -272,16 +317,16 @@ async def upload_document(
     session_id: Optional[str] = Form(None),
     authenticated: bool = Depends(verify_api_key)
 ):
-    """Upload a document and store in Redis for the session"""
+    """
+    Upload a document, extract text, and store results in Redis session state.
+
+    Applies content-type, signature, page, size, and per-session upload limits.
+    """
     try:
         if not session_id:
             session_id = str(uuid.uuid4())
 
-        print(f"\n{'='*60}")
-        print(f"📤 UPLOAD REQUEST")
-        print(f"Session ID: {session_id}")
-        print(f"Filename: {file.filename}")
-        print(f"Content-Type: {file.content_type}")
+        logger.info(f"Upload request - Session ID: {session_id}, Filename: {file.filename}, Content-Type: {file.content_type}")
 
         # Check upload count for this session
         redis_client = await get_redis_client()
@@ -290,7 +335,7 @@ async def upload_document(
         current_docs = json.loads(session_data) if session_data else []
 
         if len(current_docs) >= config.MAX_UPLOADS_PER_SESSION:
-            print(f"❌ Upload limit reached: {len(current_docs)}/{config.MAX_UPLOADS_PER_SESSION}")
+            logger.warning(f"Upload limit reached: {len(current_docs)}/{config.MAX_UPLOADS_PER_SESSION}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Upload limit reached. Maximum {config.MAX_UPLOADS_PER_SESSION} files per session."
@@ -305,7 +350,7 @@ async def upload_document(
 
         # Read file content
         file_content = await file.read()
-        print(f"File size: {len(file_content)} bytes")
+        logger.info(f"File size: {len(file_content)} bytes")
 
         # Validate file size
         if len(file_content) > config.MAX_FILE_SIZE_BYTES:
@@ -322,20 +367,20 @@ async def upload_document(
             )
 
         # Extract text using Document Intelligence
-        print(f"Extracting text from {file.filename}...")
+        logger.info(f"Extracting text from {file.filename}")
         extraction_result = await doc_intelligence_service.extract_text(
             file_content,
             file.filename
         )
 
         if not extraction_result['success']:
-            print(f"❌ Extraction failed: {extraction_result.get('error')}")
+            logger.error(f"Extraction failed: {extraction_result.get('error')}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to extract text: {extraction_result.get('error', 'Unknown error')}"
             )
 
-        print(f"✅ Extracted {len(extraction_result['text'])} characters from {extraction_result['page_count']} pages")
+        logger.info(f"Extracted {len(extraction_result['text'])} characters from {extraction_result['page_count']} pages")
 
         # Add to session documents
         current_docs.append({
@@ -352,12 +397,11 @@ async def upload_document(
             json.dumps(current_docs)
         )
 
-        print(f"✅ Stored in Redis session: {session_id}")
-        print(f"📊 Session now has {len(current_docs)}/{config.MAX_UPLOADS_PER_SESSION} documents:")
+        logger.info(f"Stored in Redis session: {session_id}")
+        logger.info(f"Session now has {len(current_docs)}/{config.MAX_UPLOADS_PER_SESSION} documents")
         for i, doc in enumerate(current_docs, 1):
             page_count = len(doc.get('page_texts', [])) if 'page_texts' in doc else doc.get('page_count', 1)
-            print(f"   {i}. {doc['filename']} ({page_count} pages, {len(doc.get('content', ''))} chars)")
-        print(f"{'='*60}\n")
+            logger.debug(f"{i}. {doc['filename']} ({page_count} pages, {len(doc.get('content', ''))} chars)")
 
         return {
             "message": "File uploaded and ready for queries!",
@@ -372,9 +416,7 @@ async def upload_document(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error in upload_document: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Error in upload_document: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -383,12 +425,16 @@ async def cleanup_session(
     request_body: CleanupRequest,
     authenticated: bool = Depends(verify_api_key)
 ):
-    """Clean up session documents from Redis"""
+    """
+    Delete all uploaded documents for a session from Redis.
+
+    Args:
+        request_body: Cleanup request with `session_id`.
+        authenticated: Authentication dependency guard.
+    """
     try:
         session_id = request_body.session_id
-        print(f"\n{'='*60}")
-        print(f"🗑️  CLEANUP REQUEST")
-        print(f"Session ID: {session_id}")
+        logger.info(f"Cleanup request - Session ID: {session_id}")
 
         if not session_id:
             raise HTTPException(status_code=400, detail="session_id is required")
@@ -401,16 +447,14 @@ async def cleanup_session(
             session_docs = json.loads(session_data)
             files_count = len(session_docs)
             await redis_client.delete(session_key)
-            print(f"✅ Deleted {files_count} documents from Redis session")
-            print(f"{'='*60}\n")
+            logger.info(f"Deleted {files_count} documents from Redis session")
             return {
                 "message": "Session cleaned up successfully",
                 "session_id": session_id,
                 "files_deleted": files_count
             }
 
-        print(f"⚠️  Session not found")
-        print(f"{'='*60}\n")
+        logger.warning("Session not found")
         return {
             "message": "No session found",
             "session_id": session_id,
@@ -420,7 +464,7 @@ async def cleanup_session(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error in cleanup_session: {e}")
+        logger.exception(f"Error in cleanup_session: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -23,9 +23,9 @@ timeout = 120           # Kill worker if silent for 120s (covers long Document I
 keepalive = 5
 
 # Logging
-accesslog = "-"
+accesslog = None
 errorlog = "-"
-loglevel = "info"
+loglevel = "warning"
 
 # Preload app before forking workers (saves memory, faster startup)
 preload_app = True

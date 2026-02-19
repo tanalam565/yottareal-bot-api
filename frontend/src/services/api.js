@@ -1,8 +1,21 @@
+/**
+ * API Service Layer
+ * 
+ * Centralizes all HTTP communication between the frontend and backend API.
+ * Provides preconfigured Axios client, authentication headers, and helper
+ * functions for chat and health check endpoints.
+ */
+
 import axios from 'axios';
+
+// ============ Configuration Constants ============
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
 const API_KEY = process.env.REACT_APP_CHATBOT_API_KEY || '';
 
+/**
+ * Preconfigured Axios instance for backend API calls.
+ */
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
@@ -11,6 +24,14 @@ const api = axios.create({
   },
 });
 
+/**
+ * Send a chat message to the backend chat endpoint.
+ * 
+ * @async
+ * @param {string} messageText - User message text to send.
+ * @param {string|null} [sessionId=null] - Optional session id for continuity.
+ * @returns {Promise<Object>} Chat response payload containing response text, sources, and session id.
+ */
 export const sendMessage = async (messageText, sessionId = null) => {
   try {
     const response = await api.post('/chat', {
@@ -24,6 +45,12 @@ export const sendMessage = async (messageText, sessionId = null) => {
   }
 };
 
+/**
+ * Check backend API health status.
+ * 
+ * @async
+ * @returns {Promise<Object>} Health status object from backend.
+ */
 export const checkHealth = async () => {
   try {
     const response = await api.get('/health');
@@ -34,4 +61,7 @@ export const checkHealth = async () => {
   }
 };
 
+/**
+ * Default export for direct API usage when needed.
+ */
 export default api;

@@ -1,10 +1,20 @@
-# start.py - Cross-platform startup script
-# Linux/Mac: uses Gunicorn + Uvicorn workers
-# Windows/IIS: uses Uvicorn directly with multiple workers
+"""
+Cross-platform backend startup entrypoint.
+
+Linux/macOS: starts Gunicorn with Uvicorn workers.
+Windows/IIS: starts Uvicorn directly with multi-worker mode.
+"""
 
 import sys
 import os
 import multiprocessing
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 def get_worker_count():
@@ -16,11 +26,11 @@ def start_linux():
     try:
         import gunicorn.app.base
     except ImportError:
-        print("⚠️  Gunicorn not found, falling back to Uvicorn")
+        logger.warning("Gunicorn not found, falling back to Uvicorn")
         start_uvicorn()
         return
 
-    print(f"🚀 Starting with Gunicorn ({get_worker_count()} workers) on Linux")
+    logger.info(f"Starting with Gunicorn ({get_worker_count()} workers) on Linux")
     os.execlp(
         "gunicorn",
         "gunicorn",
@@ -35,13 +45,13 @@ def start_uvicorn():
     host = os.getenv("APP_HOST", "0.0.0.0")
     port = os.getenv("APP_PORT", "8000")
 
-    print(f"🚀 Starting with Uvicorn ({workers} workers) on Windows/IIS")
-    print(f"   Binding to {host}:{port}")
+    logger.info(f"Starting with Uvicorn ({workers} workers) on Windows/IIS")
+    logger.info(f"Binding to {host}:{port}")
 
     try:
         import uvicorn
     except ImportError:
-        print("❌ Uvicorn not found. Run: pip install uvicorn[standard]")
+        logger.error("Uvicorn not found. Run: pip install uvicorn[standard]")
         sys.exit(1)
 
     # On Windows, uvicorn --workers requires Python 3.8+ and no --reload
@@ -57,13 +67,9 @@ def start_uvicorn():
 
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("  YottaReal Property Management Chatbot")
-    print("=" * 50)
-    print(f"  Platform : {sys.platform}")
-    print(f"  CPU cores: {multiprocessing.cpu_count()}")
-    print(f"  Workers  : {get_worker_count()}")
-    print("=" * 50)
+    logger.info(
+        f"Starting YottaReal backend on {sys.platform} with {get_worker_count()} workers"
+    )
 
     if sys.platform.startswith("win"):
         start_uvicorn()

@@ -1,4 +1,13 @@
-# config.py - Full Updated Code
+"""
+Configuration module for the YottaReal Bot API.
+
+This module centralizes all environment-driven settings used by backend services,
+including Azure integrations, Redis session/history behavior, upload limits,
+rate limiting, and CORS settings.
+
+All values provide development-safe defaults, but production deployments should
+define environment variables explicitly.
+"""
 
 import os
 from dotenv import load_dotenv
