@@ -14,3 +14,5 @@ slowapi==0.1.9  # Request rate-limiting middleware for API protection.
 tenacity==8.2.3  # Retry logic with backoff for resilient external service calls.
 gunicorn==21.2.0  # Production process manager/server for running multiple workers.
 httpx[http2]  # Enables HTTP/2 support for httpx to improve API connection performance.
+pytest==8.3.4  # Test runner for backend unit/integration tests.
+pytest-asyncio==0.25.3  # Async support for pytest-based coroutine tests.
