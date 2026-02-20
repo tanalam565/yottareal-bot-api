@@ -26,7 +26,7 @@ Endpoints:
 - GET /api/health: Health check (public)
 
 Environment Variables:
-- CHATBOT_API_KEY: Optional API key for authentication
+- CHATBOT_API_KEY: API key for authentication
 - Various Azure service configurations (see config.py)
 
 Dependencies:
@@ -60,6 +60,10 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+if not config.CHATBOT_API_KEY:
+    logger.critical("CHATBOT_API_KEY is not configured. Refusing to start without API authentication.")
+    raise RuntimeError("CHATBOT_API_KEY environment variable is required")
 
 # Reduce noisy third-party logs while keeping app/service logs readable.
 for noisy_logger in [
@@ -168,8 +172,6 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
     Raises:
         HTTPException: If key is missing/invalid when auth is enabled.
     """
-    if not config.CHATBOT_API_KEY:
-        return True
     if api_key != config.CHATBOT_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing API key")
     return True
@@ -324,7 +326,7 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
 
     except Exception as e:
         logger.exception(f"Chat error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error while processing chat request")
 
 
 @app.post("/api/upload")
@@ -395,7 +397,7 @@ async def upload_document(
             logger.error(f"Extraction failed: {extraction_result.get('error')}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to extract text: {extraction_result.get('error', 'Unknown error')}"
+                detail="Failed to process uploaded file"
             )
 
         logger.info(f"Extracted {len(extraction_result['text'])} characters from {extraction_result['page_count']} pages")
@@ -432,7 +434,7 @@ async def upload_document(
         raise
     except Exception as e:
         logger.exception(f"Error in upload_document: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error while uploading document")
 
 
 @app.post("/api/cleanup-session")
@@ -480,7 +482,7 @@ async def cleanup_session(
         raise
     except Exception as e:
         logger.exception(f"Error in cleanup_session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error while cleaning up session")
 
 
 @app.get("/api/indexer/status")
@@ -490,7 +492,8 @@ async def get_indexer_status(authenticated: bool = Depends(verify_api_key)):
         status = await search_service.get_indexer_status()
         return status
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Error getting indexer status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error while fetching indexer status")
 
 
 @app.post("/api/indexer/run")
@@ -503,7 +506,8 @@ async def run_indexer(authenticated: bool = Depends(verify_api_key)):
         else:
             raise HTTPException(status_code=500, detail="Failed to trigger indexer")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Error triggering indexer: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error while triggering indexer")
 
 
 @app.get("/api/health")
@@ -520,8 +524,9 @@ async def health_check():
         redis_client = await get_redis_client()
         await redis_client.ping()
     except Exception as e:
+        logger.warning(f"Health check degraded due to Redis issue: {e}")
         health["status"] = "degraded"
-        health["redis"] = f"unhealthy: {str(e)}"
+        health["redis"] = "unhealthy"
 
     return health
 

@@ -82,4 +82,16 @@ RATE_LIMIT_UPLOAD = os.getenv("RATE_LIMIT_UPLOAD", "5/minute")
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 
 # CORS - comma-separated list of allowed origins
-CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
+def _parse_cors_allowed_origins(raw_value: str) -> list[str]:
+	"""Parse comma-separated CORS origins into a normalized list."""
+	if not raw_value:
+		return []
+	origins = [origin.strip() for origin in raw_value.split(",") if origin.strip()]
+	if "*" in origins and len(origins) > 1:
+		raise ValueError("CORS_ALLOWED_ORIGINS cannot mix '*' with specific origins")
+	return origins
+
+
+CORS_ALLOWED_ORIGINS = _parse_cors_allowed_origins(
+	os.getenv("CORS_ALLOWED_ORIGINS", "")
+)
