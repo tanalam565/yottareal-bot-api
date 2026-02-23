@@ -85,7 +85,8 @@ def list_blob_files():
     for blob in container.list_blobs():
         if blob.name.endswith("/"):
             continue
-        files.add(blob.name.split("/")[-1])
+        filename = blob.name.split("/")[-1]
+        files.add(urllib.parse.unquote(filename))
     return files
 
 
@@ -137,6 +138,11 @@ def reconcile_blob_vs_index():
     extra = sorted(index_files - blob_files)
 
     logger.info("Blob files: %d, Index source files: %d", len(blob_files), len(index_files))
+    if blob_files:
+        logger.info("Documents currently present in blob container:")
+        for i, filename in enumerate(sorted(blob_files), 1):
+            logger.info("%d. %s", i, filename)
+
     logger.info("Missing from INDEX (present in blob, not indexed): %d", len(missing))
     for i, f in enumerate(missing, 1):
         logger.info("%d. %s", i, f)
@@ -148,5 +154,10 @@ def reconcile_blob_vs_index():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+
     # Run the reconcile function by default
     reconcile_blob_vs_index()
