@@ -6,8 +6,11 @@ can provide secure, time-limited document access.
 """
 
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
+from azure.core.exceptions import ResourceExistsError
 from datetime import datetime, timedelta
 import urllib.parse
+import os
+import uuid
 import logging
 import config
 
@@ -20,7 +23,36 @@ class BlobService:
             config.AZURE_STORAGE_CONNECTION_STRING
         )
         self.container_name = config.AZURE_STORAGE_CONTAINER_NAME
+        self.uploads_container_name = config.AZURE_UPLOADS_CONTAINER_NAME
         self.logger = logging.getLogger(__name__)
+
+    def upload_user_file(self, file_content: bytes, session_id: str, filename: str) -> dict | None:
+        """
+        Upload a user-provided file to the dedicated uploads container.
+
+        Returns:
+            dict | None: Uploaded blob metadata (container/name/url), or None on error.
+        """
+        try:
+            container_client = self.blob_service_client.get_container_client(self.uploads_container_name)
+            try:
+                container_client.create_container()
+            except ResourceExistsError:
+                pass
+
+            safe_filename = os.path.basename(filename or "upload.bin")
+            blob_name = f"{session_id}/{uuid.uuid4()}_{safe_filename}"
+            blob_client = container_client.get_blob_client(blob_name)
+            blob_client.upload_blob(file_content, overwrite=False)
+
+            return {
+                "container": self.uploads_container_name,
+                "blob_name": blob_name,
+                "blob_url": blob_client.url,
+            }
+        except Exception as e:
+            self.logger.error("Error uploading user file %s: %s", filename, e)
+            return None
     
     def generate_download_url(self, blob_name: str, expiry_hours: int = 1) -> str:
         """

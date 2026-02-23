@@ -3,6 +3,7 @@
 # Azure Blob Storage
 AZURE_STORAGE_CONNECTION_STRING=
 AZURE_STORAGE_CONTAINER_NAME=
+AZURE_UPLOADS_CONTAINER_NAME=user-uploads
 
 # Azure AI Search
 AZURE_SEARCH_ENDPOINT=
@@ -21,6 +22,10 @@ AZURE_OPENAI_API_VERSION=
 
 AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT=
 AZURE_DOCUMENT_INTELLIGENCE_KEY=
+
+# Durable source-of-truth storage (chat + uploads metadata/pages)
+DATABASE_URL=postgresql://user:password@host:5432/yottareal
+PERSISTENCE_DB_PATH=backend/data/chat_logs.db
 
 # Azure OpenAI Embeddings
 AZURE_OPENAI_EMBEDDING_ENDPOINT=

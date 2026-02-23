@@ -24,6 +24,7 @@ load_dotenv()
 # Azure Blob Storage Configuration
 AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
 AZURE_STORAGE_CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "filescontainer")
+AZURE_UPLOADS_CONTAINER_NAME = os.getenv("AZURE_UPLOADS_CONTAINER_NAME", "user-uploads")
 
 # Azure AI Search Configuration
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT", "")
@@ -80,6 +81,14 @@ RATE_LIMIT_UPLOAD = os.getenv("RATE_LIMIT_UPLOAD", "5/minute")
 
 # Request Timeouts
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
+
+# Durable storage (source of truth)
+_BASE_DIR = os.path.dirname(__file__)
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+PERSISTENCE_DB_PATH = os.getenv(
+	"PERSISTENCE_DB_PATH",
+	os.path.join(_BASE_DIR, "data", "chat_logs.db")
+)
 
 # CORS - comma-separated list of allowed origins
 def _parse_cors_allowed_origins(raw_value: str) -> list[str]:

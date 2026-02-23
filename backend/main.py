@@ -36,6 +36,7 @@ Dependencies:
 """
 from contextlib import asynccontextmanager
 import logging
+import asyncio
 from fastapi import FastAPI, HTTPException, Security, Depends, UploadFile, File, Form, Request
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,14 +46,12 @@ import uvicorn
 import uuid
 import json
 
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-
 from services.azure_search_service import AzureSearchService
 from services.llm_service import LLMService
 from services.document_intelligence_service import DocumentIntelligenceService
 from services.redis_service import get_redis_client, close_redis
+from services.blob_service import BlobService
+from services.chat_storage_service import PersistenceService
 import config
 
 logging.basicConfig(
@@ -131,16 +130,59 @@ def validate_file_content(content: bytes, content_type: str) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context for startup/shutdown resource management."""
+    await persistence_service.initialize()
     yield
     await close_redis()
 
 
-# Rate limiter
-limiter = Limiter(key_func=get_remote_address)
+RATE_WINDOW_SECONDS = {
+    "second": 1,
+    "seconds": 1,
+    "minute": 60,
+    "minutes": 60,
+    "hour": 3600,
+    "hours": 3600,
+    "day": 86400,
+    "days": 86400,
+}
+
+
+def parse_rate_limit(rate_limit: str) -> tuple[int, int]:
+    """Parse limits like '20/minute' into (max_requests, window_seconds)."""
+    try:
+        amount_raw, window_raw = rate_limit.strip().split("/", 1)
+        max_requests = int(amount_raw)
+        window_seconds = RATE_WINDOW_SECONDS.get(window_raw.strip().lower())
+        if max_requests <= 0 or not window_seconds:
+            raise ValueError("Invalid rate limit format")
+        return max_requests, window_seconds
+    except Exception as e:
+        logger.error("Invalid rate limit config '%s': %s", rate_limit, e)
+        raise RuntimeError(f"Invalid rate limit config: {rate_limit}")
+
+
+async def enforce_session_rate_limit(session_id: str, action: str, rate_limit: str):
+    """Enforce per-session rate limit using Redis counters."""
+    max_requests, window_seconds = parse_rate_limit(rate_limit)
+    redis_client = await get_redis_client()
+    key = f"ratelimit:{action}:{session_id}"
+
+    current_count = await redis_client.incr(key)
+    if current_count == 1:
+        await redis_client.expire(key, window_seconds)
+
+    if current_count > max_requests:
+        retry_after = await redis_client.ttl(key)
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "message": f"Rate limit exceeded for session '{session_id}'",
+                "limit": rate_limit,
+                "retry_after_seconds": max(retry_after, 0),
+            },
+        )
 
 app = FastAPI(title="Property Management Chatbot API", lifespan=lifespan)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -154,6 +196,8 @@ app.add_middleware(
 search_service = AzureSearchService()
 llm_service = LLMService()
 doc_intelligence_service = DocumentIntelligenceService()
+blob_service = BlobService()
+persistence_service = PersistenceService()
 
 # API Key Authentication
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -196,7 +240,6 @@ class CleanupRequest(BaseModel):
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-@limiter.limit(config.RATE_LIMIT_CHAT)
 async def chat(request: Request, body: ChatRequest, authenticated: bool = Depends(verify_api_key)):
     """
     Process chat messages with session uploads and indexed document retrieval.
@@ -210,6 +253,15 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
         ChatResponse: AI response with source citations and session id.
     """
     try:
+        if not body.session_id:
+            body.session_id = str(uuid.uuid4())
+
+        await enforce_session_rate_limit(
+            session_id=body.session_id,
+            action="chat",
+            rate_limit=config.RATE_LIMIT_CHAT,
+        )
+
         logger.info(f"Chat request - Session ID: {body.session_id}, Query: {body.message}")
 
         # GET ALL UPLOADED DOCUMENTS FOR THIS SESSION (REDIS) 
@@ -318,6 +370,16 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
 
         logger.info(f"Sources after deduplication: {len(unique_sources)}")
 
+        try:
+            await persistence_service.save_chat_exchange(
+                session_id=response["session_id"],
+                query=body.message,
+                answer=response["answer"],
+                sources=unique_sources,
+            )
+        except Exception as persistence_error:
+            logger.warning("Failed to persist chat exchange: %s", persistence_error)
+
         return ChatResponse(
             response=response["answer"],
             sources=unique_sources,
@@ -330,7 +392,6 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
 
 
 @app.post("/api/upload")
-@limiter.limit(config.RATE_LIMIT_UPLOAD)
 async def upload_document(
     request: Request,
     file: UploadFile = File(...),
@@ -346,7 +407,15 @@ async def upload_document(
         if not session_id:
             session_id = str(uuid.uuid4())
 
+        await enforce_session_rate_limit(
+            session_id=session_id,
+            action="upload",
+            rate_limit=config.RATE_LIMIT_UPLOAD,
+        )
+
         logger.info(f"Upload request - Session ID: {session_id}, Filename: {file.filename}, Content-Type: {file.content_type}")
+
+        await persistence_service.ensure_session(session_id)
 
         # Check upload count for this session
         redis_client = await get_redis_client()
@@ -402,6 +471,18 @@ async def upload_document(
 
         logger.info(f"Extracted {len(extraction_result['text'])} characters from {extraction_result['page_count']} pages")
 
+        blob_info = await asyncio.to_thread(
+            blob_service.upload_user_file,
+            file_content,
+            session_id,
+            file.filename,
+        )
+        if not blob_info:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to store uploaded file"
+            )
+
         # Add to session documents
         current_docs.append({
             "filename": file.filename,
@@ -417,6 +498,14 @@ async def upload_document(
             json.dumps(current_docs)
         )
 
+        upload_id = await persistence_service.save_upload(
+            session_id=session_id,
+            filename=file.filename,
+            content_type=file.content_type,
+            extraction_result=extraction_result,
+            blob_info=blob_info,
+        )
+
         logger.info(f"Stored in Redis session: {session_id}")
         logger.info(f"Session now has {len(current_docs)}/{config.MAX_UPLOADS_PER_SESSION} documents")
 
@@ -424,6 +513,7 @@ async def upload_document(
             "message": "File uploaded and ready for queries!",
             "filename": file.filename,
             "session_id": session_id,
+            "upload_id": upload_id,
             "pages_extracted": extraction_result['page_count'],
             "text_length": len(extraction_result['text']),
             "immediate_access": True,
@@ -464,6 +554,12 @@ async def cleanup_session(
             session_docs = json.loads(session_data)
             files_count = len(session_docs)
             await redis_client.delete(session_key)
+
+            try:
+                await persistence_service.delete_session(session_id)
+            except Exception as persistence_error:
+                logger.warning("Failed to delete persisted session data: %s", persistence_error)
+
             logger.info(f"Deleted {files_count} documents from Redis session")
             return {
                 "message": "Session cleaned up successfully",
@@ -472,6 +568,12 @@ async def cleanup_session(
             }
 
         logger.warning("Session not found")
+
+        try:
+            await persistence_service.delete_session(session_id)
+        except Exception as persistence_error:
+            logger.warning("Failed to delete persisted session data: %s", persistence_error)
+
         return {
             "message": "No session found",
             "session_id": session_id,
