@@ -40,7 +40,8 @@ class LLMService:
         try:
             redis_client = await get_redis_client()
             data = await redis_client.get(f"conv:{session_id}")
-            return json.loads(data) if data else []
+            history = json.loads(data) if data else []
+            return self._sanitize_history_for_prompt(history)
         except Exception as e:
             self.logger.warning("Redis history load error: %s", e)
             return []
@@ -48,6 +49,7 @@ class LLMService:
     async def _save_history(self, session_id: str, history: list):
         """Save bounded conversation history for a session with configured TTL."""
         try:
+            history = self._sanitize_history_for_prompt(history)
             if len(history) > config.MAX_CONVERSATION_TURNS:
                 history = history[-config.MAX_CONVERSATION_TURNS:]
             redis_client = await get_redis_client()
@@ -58,6 +60,27 @@ class LLMService:
             )
         except Exception as e:
             self.logger.warning("Redis history save error: %s", e)
+
+    def _sanitize_history_for_prompt(self, history: list) -> list:
+        """Remove inline citation markers from stored history to avoid stale remapping."""
+        citation_pattern = r'\[(\d+)(?:\s*→\s*Page\s*\d+)?\]'
+        sanitized = []
+
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+
+            query = entry.get("query", "")
+            response = entry.get("response", "")
+            clean_response = re.sub(citation_pattern, '', response)
+            clean_response = re.sub(r'\s{2,}', ' ', clean_response).strip()
+
+            sanitized.append({
+                "query": query,
+                "response": clean_response
+            })
+
+        return sanitized
 
     # ── Prompt builders (unchanged) ───────────────────────────────────────────────
 
@@ -199,6 +222,9 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         Returns:
             tuple[str, list]: Updated response text and normalized source list.
         """
+        response_text = self._normalize_placeholder_citations(response_text, doc_mapping)
+        response_text = self._expand_grouped_citations(response_text)
+
         citation_pattern = r'\[(\d+)(?:\s*→\s*Page\s*(\d+))?\]'
         matches = re.finditer(citation_pattern, response_text)
 
@@ -258,6 +284,42 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
             })
 
         return updated_text, sources
+
+    def _normalize_placeholder_citations(self, response_text: str, doc_mapping: Dict) -> str:
+        """Replace template citations like [N → Page X] with concrete numeric citations."""
+        if not doc_mapping:
+            return response_text
+
+        uploaded_doc_numbers = [
+            doc_num for doc_num, info in doc_mapping.items()
+            if info.get("type") == "uploaded"
+        ]
+        fallback_doc_num = min(uploaded_doc_numbers) if uploaded_doc_numbers else min(doc_mapping.keys())
+
+        fallback_pages = doc_mapping.get(fallback_doc_num, {}).get("pages") or {1}
+        fallback_page = min(fallback_pages)
+
+        template_pattern = r'\[(N|n)(?:\s*→\s*Page\s*(X|x|\d+))?\]'
+
+        def replace_template(match):
+            raw_page = match.group(2)
+            if raw_page and raw_page.isdigit():
+                page_number = raw_page
+            else:
+                page_number = str(fallback_page)
+            return f"[{fallback_doc_num} → Page {page_number}]"
+
+        return re.sub(template_pattern, replace_template, response_text)
+
+    def _expand_grouped_citations(self, response_text: str) -> str:
+        """Expand grouped citation blocks into individual bracketed citations."""
+        grouped_pattern = r'\[((?:\s*\d+\s*(?:→\s*Page\s*\d+)?\s*[;,]\s*)+\s*\d+\s*(?:→\s*Page\s*\d+)?\s*)\]'
+
+        def replace_group(match):
+            parts = [part.strip() for part in re.split(r'[;,]', match.group(1)) if part.strip()]
+            return " ".join(f"[{part}]" for part in parts)
+
+        return re.sub(grouped_pattern, replace_group, response_text)
 
     def _clean_response(self, response_text: str) -> str:
         """Remove undesired markdown formatting and trim response text."""

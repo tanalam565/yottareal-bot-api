@@ -2,8 +2,8 @@
  * API Service Layer
  * 
  * Centralizes all HTTP communication between the frontend and backend API.
- * Provides preconfigured Axios client, authentication headers, and helper
- * functions for chat and health check endpoints.
+ * Provides preconfigured Axios client, API-key headers, and helper
+ * functions for upload, chat, cleanup, and health endpoints.
  */
 
 import axios from 'axios';
@@ -20,9 +20,32 @@ const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
-    'X-API-Key': API_KEY
   },
 });
+
+api.interceptors.request.use((requestConfig) => {
+  if (API_KEY) {
+    requestConfig.headers['X-API-Key'] = API_KEY;
+  }
+  return requestConfig;
+});
+
+export const uploadDocument = async (file, sessionId) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('session_id', sessionId);
+  const response = await api.post('/upload', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  });
+  return response.data;
+};
+
+export const cleanupSession = async (sessionId) => {
+  const response = await api.post('/cleanup-session', { session_id: sessionId });
+  return response.data;
+};
 
 /**
  * Send a chat message to the backend chat endpoint.

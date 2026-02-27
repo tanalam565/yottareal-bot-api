@@ -45,11 +45,6 @@ function App() {
       
       {/* Main Content Area - Chat Interface */}
       <main className="chat-main">
-        {/* ChatInterface Component: Handles all user interactions including:
-            - Message sending and receiving
-            - Document uploads
-            - Citation management
-            - Session management */}
         <ChatInterface />
       </main>
       

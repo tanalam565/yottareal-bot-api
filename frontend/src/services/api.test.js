@@ -1,13 +1,21 @@
-jest.mock('axios');
+jest.mock('axios', () => ({
+  create: jest.fn(),
+}));
 
 const axios = require('axios');
 
 const mockPost = jest.fn();
 const mockGet = jest.fn();
+const mockUseInterceptor = jest.fn();
 
 axios.create.mockReturnValue({
   post: mockPost,
   get: mockGet,
+  interceptors: {
+    request: {
+      use: mockUseInterceptor,
+    },
+  },
 });
 
 const { sendMessage, checkHealth } = require('./api');

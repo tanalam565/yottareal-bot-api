@@ -61,8 +61,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 if not config.CHATBOT_API_KEY:
-    logger.critical("CHATBOT_API_KEY is not configured. Refusing to start without API authentication.")
-    raise RuntimeError("CHATBOT_API_KEY environment variable is required")
+    logger.warning("CHATBOT_API_KEY is not configured; admin-only endpoints requiring API key will be unavailable.")
 
 # Reduce noisy third-party logs while keeping app/service logs readable.
 for noisy_logger in [
@@ -278,8 +277,14 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
                 await redis_client.expire(session_key, config.SESSION_TTL_SECONDS)
 
             for doc in session_docs:
-                if 'page_texts' in doc and doc['page_texts']:
-                    for page_info in doc['page_texts']:
+                page_entries = doc.get('page_texts') or []
+                non_empty_pages = [
+                    page_info for page_info in page_entries
+                    if (page_info.get('text') or '').strip()
+                ]
+
+                if non_empty_pages:
+                    for page_info in non_empty_pages:
                         session_context.append({
                             "content": page_info['text'],
                             "filename": doc["filename"],
@@ -287,8 +292,11 @@ async def chat(request: Request, body: ChatRequest, authenticated: bool = Depend
                             "page_number": page_info['page_number']
                         })
                 else:
+                    fallback_content = (doc.get("content") or "").strip()
+                    if not fallback_content:
+                        continue
                     session_context.append({
-                        "content": doc["content"],
+                        "content": fallback_content,
                         "filename": doc["filename"],
                         "source_type": "uploaded",
                         "page_number": 1
@@ -548,12 +556,14 @@ async def cleanup_session(
 
         redis_client = await get_redis_client()
         session_key = f"session:{session_id}"
+        conversation_key = f"conv:{session_id}"
         session_data = await redis_client.get(session_key)
 
         if session_data:
             session_docs = json.loads(session_data)
             files_count = len(session_docs)
             await redis_client.delete(session_key)
+            await redis_client.delete(conversation_key)
 
             try:
                 await persistence_service.delete_session(session_id)
@@ -568,6 +578,8 @@ async def cleanup_session(
             }
 
         logger.warning("Session not found")
+
+        await redis_client.delete(conversation_key)
 
         try:
             await persistence_service.delete_session(session_id)

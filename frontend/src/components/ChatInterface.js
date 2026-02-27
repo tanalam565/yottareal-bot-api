@@ -13,13 +13,11 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { sendMessage } from '../services/api';
+import { sendMessage, uploadDocument, cleanupSession } from '../services/api';
 import './ChatInterface.css';
 
 // ============ Configuration & Constants ============
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
-const API_KEY = process.env.REACT_APP_CHATBOT_API_KEY || '';
 const SUPPORTED_FORMATS = '.pdf,.jpg,.jpeg,.png,.tiff,.bmp,.docx,.txt';
 const COPY_FEEDBACK_DURATION = 2000;
 const CITE_HIGHLIGHT_DURATION = 1000;
@@ -88,28 +86,15 @@ function ChatInterface() {
    * This prevents orphaned files left on the server.
    */
   useEffect(() => {
-    const cleanupSession = async () => {
+    const cleanupCurrentSession = async () => {
       if (uploadedFiles.length > 0 && sessionId) {
         try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
-
-          await fetch(
-            `${API_BASE_URL}/cleanup-session`,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'X-API-Key': API_KEY
-              },
-              body: JSON.stringify({ session_id: sessionId }),
-              keepalive: true,
-              signal: controller.signal
-            }
-          );
-          clearTimeout(timeoutId);
+          await Promise.race([
+            cleanupSession(sessionId),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), REQUEST_TIMEOUT)),
+          ]);
         } catch (error) {
-          if (error.name !== 'AbortError' && process.env.NODE_ENV === 'development') {
+          if (process.env.NODE_ENV === 'development') {
             console.error('Cleanup error:', error);
           }
         }
@@ -118,7 +103,7 @@ function ChatInterface() {
 
     const handleBeforeUnload = () => {
       if (uploadedFiles.length > 0) {
-        cleanupSession();
+        cleanupCurrentSession();
       }
     };
 
@@ -127,7 +112,7 @@ function ChatInterface() {
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
-      cleanupSession();
+      cleanupCurrentSession();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -267,23 +252,8 @@ function ChatInterface() {
 
     try {
       for (const file of files) {
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('session_id', sessionId);
-
-        const response = await fetch(
-          `${API_BASE_URL}/upload`,
-          {
-            method: 'POST',
-            headers: {
-              'X-API-Key': API_KEY
-            },
-            body: formData
-          }
-        );
-
-        if (response.ok) {
-          const result = await response.json();
+        try {
+          const result = await uploadDocument(file, sessionId);
 
           uploadResults.push({
             name: file.name,
@@ -295,12 +265,11 @@ function ChatInterface() {
           if (result.uploads_remaining !== undefined) {
             setUploadsRemaining(result.uploads_remaining);
           }
-        } else {
-          const error = await response.json();
+        } catch (error) {
           uploadResults.push({
             name: file.name,
             success: false,
-            error: error.detail || 'Upload failed'
+            error: error?.response?.data?.detail || 'Upload failed'
           });
         }
       }
@@ -369,30 +338,15 @@ function ChatInterface() {
     }
 
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/cleanup-session`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': API_KEY
-          },
-          body: JSON.stringify({ session_id: sessionId })
-        }
-      );
-
-      if (response.ok) {
-        setUploadedFiles([]);
-        setUploadsRemaining(MAX_UPLOADS_PER_SESSION);
-        const systemMessage = {
-          role: 'system',
-          content: '✓ All uploaded documents have been deleted.',
-          timestamp: new Date()
-        };
-        setMessages(prev => [...prev, systemMessage]);
-      } else {
-        throw new Error('Failed to clear uploads');
-      }
+      await cleanupSession(sessionId);
+      setUploadedFiles([]);
+      setUploadsRemaining(MAX_UPLOADS_PER_SESSION);
+      const systemMessage = {
+        role: 'system',
+        content: '✓ All uploaded documents have been deleted.',
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, systemMessage]);
     } catch (error) {
       if (process.env.NODE_ENV === 'development') {
         console.error('Clear error:', error);

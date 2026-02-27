@@ -54,6 +54,9 @@ AZURE_DOCUMENT_INTELLIGENCE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "
 # API Key Authentication
 CHATBOT_API_KEY = os.getenv("CHATBOT_API_KEY", "")
 
+# Base directory used for local durable storage paths
+_BASE_DIR = os.path.dirname(__file__)
+
 # Application Settings
 MAX_SEARCH_RESULTS = 15
 CHUNK_SIZE = 1000
@@ -83,7 +86,6 @@ RATE_LIMIT_UPLOAD = os.getenv("RATE_LIMIT_UPLOAD", "5/minute")
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 
 # Durable storage (source of truth)
-_BASE_DIR = os.path.dirname(__file__)
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 PERSISTENCE_DB_PATH = os.getenv(
 	"PERSISTENCE_DB_PATH",

@@ -52,21 +52,67 @@ class DocumentIntelligenceService:
             # Extract text PAGE BY PAGE — limit to MAX_UPLOAD_PAGES
             page_texts = []
 
-            if hasattr(result, 'pages'):
-                for page in result.pages:
-                    if page.page_number > config.MAX_UPLOAD_PAGES:
-                        self.logger.warning("Stopping at page %s (MAX_UPLOAD_PAGES limit)", config.MAX_UPLOAD_PAGES)
-                        break
-                    page_num = page.page_number
-                    page_content = ""
-                    if hasattr(page, 'lines'):
-                        page_content = " ".join([line.content for line in page.lines])
-                    page_texts.append({
-                        "page_number": page_num,
-                        "text": page_content
-                    })
+            pages = getattr(result, 'pages', None) or []
+            for page in pages:
+                page_number = getattr(page, 'page_number', None)
+                if page_number is None:
+                    continue
 
-            full_text = result.content if hasattr(result, 'content') else ""
+                if page_number > config.MAX_UPLOAD_PAGES:
+                    self.logger.warning("Stopping at page %s (MAX_UPLOAD_PAGES limit)", config.MAX_UPLOAD_PAGES)
+                    break
+
+                lines = getattr(page, 'lines', None) or []
+                line_texts = []
+                for line in lines:
+                    content = getattr(line, 'content', None)
+                    if content:
+                        line_texts.append(content)
+
+                page_texts.append({
+                    "page_number": page_number,
+                    "text": " ".join(line_texts)
+                })
+
+            # Fallback: some formats (notably DOCX) can return sparse/empty
+            # page.lines while still providing paragraph content.
+            has_non_empty_page_text = any((entry.get("text") or "").strip() for entry in page_texts)
+            if not has_non_empty_page_text:
+                paragraph_map = {}
+                paragraphs = getattr(result, 'paragraphs', None) or []
+                for paragraph in paragraphs:
+                    paragraph_text = (getattr(paragraph, 'content', None) or '').strip()
+                    if not paragraph_text:
+                        continue
+
+                    regions = getattr(paragraph, 'bounding_regions', None) or []
+                    page_numbers = [getattr(region, 'page_number', None) for region in regions]
+                    page_numbers = [pn for pn in page_numbers if pn is not None and pn <= config.MAX_UPLOAD_PAGES]
+                    if not page_numbers:
+                        page_numbers = [1]
+
+                    for page_number in page_numbers:
+                        paragraph_map.setdefault(page_number, []).append(paragraph_text)
+
+                if paragraph_map:
+                    page_texts = [
+                        {
+                            "page_number": page_number,
+                            "text": " ".join(chunks)
+                        }
+                        for page_number, chunks in sorted(paragraph_map.items(), key=lambda item: item[0])
+                    ]
+
+            full_text = getattr(result, 'content', None) or ""
+
+            # Final fallback: if page texts remain empty but document-level content
+            # exists, preserve that text as page 1 so downstream chat has context.
+            if not any((entry.get("text") or "").strip() for entry in page_texts) and full_text.strip():
+                page_texts = [{
+                    "page_number": 1,
+                    "text": full_text.strip()
+                }]
+
             page_count = len(page_texts)
 
             return {
