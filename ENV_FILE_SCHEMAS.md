@@ -52,7 +52,7 @@ REACT_APP_API_URL=https://your-production-server.com/api
 # API Authentication
 REACT_APP_CHATBOT_API_KEY=your-secret-api-key-here
 
-*************************************************RUN FRONTEND***************************************************
+************************************************* RUN FRONTEND ***************************************************
 cd frontend
 npm install
 npm start

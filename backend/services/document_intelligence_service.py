@@ -40,12 +40,11 @@ class DocumentIntelligenceService:
             and basic metadata.
         """
         try:
-            base64_source = base64.b64encode(file_content).decode('utf-8')
-            analyze_request = AnalyzeDocumentRequest(base64_source=base64_source)
+            analyze_request = AnalyzeDocumentRequest(bytes_source=file_content)
 
             poller = self.client.begin_analyze_document(
                 model_id="prebuilt-read",
-                analyze_request=analyze_request
+                body=analyze_request
             )
             result = poller.result()
 
