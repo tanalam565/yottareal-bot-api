@@ -30,7 +30,7 @@ class ChatbotUser(HttpUser):
                 },
                 headers={"X-API-Key": self.api_key},
                 catch_response=True,
-                timeout=30
+                timeout=90
             ) as response:
                 if response.status_code == 200:
                     response.success()

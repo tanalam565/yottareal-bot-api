@@ -3,10 +3,17 @@ LLM response generation service.
 
 Builds prompts from indexed/uploaded context, manages Redis-backed conversation
 history, and returns citation-aware answers from Azure OpenAI.
+
+Key responsibilities:
+- Construct system and user prompts with document context
+- Manage per-session conversation history via Redis
+- Call Azure OpenAI (GPT-5.4) with retry logic
+- Parse, renumber, and deduplicate inline [N → Page X] citations
+- Return structured response payload with answer, sources, and session_id
 """
 
 from typing import List, Dict, Optional
-from openai import AzureOpenAI, RateLimitError, APIConnectionError, BadRequestError
+from openai import AzureOpenAI, RateLimitError, APIConnectionError
 import uuid
 import re
 import json
@@ -22,13 +29,17 @@ class LLMService:
     """Build prompts, call Azure OpenAI, and return citation-aware responses."""
 
     def __init__(self):
-        """Initialize Azure OpenAI chat client with shared HTTP pooling."""
-        # Use shared HTTP client for connection pooling
+        """
+        Initialize Azure OpenAI chat client with shared HTTP connection pooling.
+
+        Uses the shared httpx client singleton to avoid socket churn under
+        concurrent load. Model and endpoint are pulled from config.
+        """
         self.client = AzureOpenAI(
             api_key=config.AZURE_OPENAI_API_KEY,
             api_version=config.AZURE_OPENAI_API_VERSION,
             azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
-            http_client=get_shared_http_client()  # ← SHARED POOL
+            http_client=get_shared_http_client()
         )
         self.model = config.AZURE_OPENAI_DEPLOYMENT_NAME
         self.logger = logging.getLogger(__name__)
@@ -36,7 +47,19 @@ class LLMService:
     # ── Redis history helpers ─────────────────────────────────────────────────────
 
     async def _load_history(self, session_id: str) -> list:
-        """Load prior conversation turns for a session from Redis."""
+        """
+        Load prior conversation turns for a session from Redis.
+
+        Returns an empty list if no history exists or Redis is unavailable.
+        Citation markers are stripped from stored responses before returning
+        to prevent stale citation numbers leaking into new prompts.
+
+        Args:
+            session_id: Unique session identifier.
+
+        Returns:
+            list: Sanitized list of {"query": str, "response": str} dicts.
+        """
         try:
             redis_client = await get_redis_client()
             data = await redis_client.get(f"conv:{session_id}")
@@ -47,7 +70,16 @@ class LLMService:
             return []
 
     async def _save_history(self, session_id: str, history: list):
-        """Save bounded conversation history for a session with configured TTL."""
+        """
+        Save bounded conversation history for a session with configured TTL.
+
+        Trims history to MAX_CONVERSATION_TURNS before saving to prevent
+        unbounded Redis growth. Citation markers are stripped prior to storage.
+
+        Args:
+            session_id: Unique session identifier.
+            history: Full conversation history list including the latest turn.
+        """
         try:
             history = self._sanitize_history_for_prompt(history)
             if len(history) > config.MAX_CONVERSATION_TURNS:
@@ -62,7 +94,19 @@ class LLMService:
             self.logger.warning("Redis history save error: %s", e)
 
     def _sanitize_history_for_prompt(self, history: list) -> list:
-        """Remove inline citation markers from stored history to avoid stale remapping."""
+        """
+        Remove inline citation markers from stored history entries.
+
+        Prevents stale [N → Page X] numbers from prior turns being
+        reused or misinterpreted in subsequent prompts after document
+        context changes between turns.
+
+        Args:
+            history: Raw history list from Redis, may contain citation markers.
+
+        Returns:
+            list: Cleaned history with citations removed and whitespace normalized.
+        """
         citation_pattern = r'\[(\d+)(?:\s*→\s*Page\s*\d+)?\]'
         sanitized = []
 
@@ -82,17 +126,22 @@ class LLMService:
 
         return sanitized
 
-    # ── Prompt builders (unchanged) ───────────────────────────────────────────────
+    # ── Prompt builders ───────────────────────────────────────────────────────────
 
     def _build_system_prompt(self, has_uploads: bool = False) -> str:
         """
         Build the system instruction prompt for the chat completion request.
 
+        Generates a grounding prompt that enforces citation format, bullet-point
+        style, and source attribution rules. The prompt differs slightly depending
+        on whether user-uploaded documents are present in the context, to guide
+        the model toward clearly distinguishing uploaded vs company sources.
+
         Args:
-            has_uploads: Whether user-uploaded documents are present in context.
+            has_uploads: True when user-uploaded documents are in the context.
 
         Returns:
-            str: Instruction prompt defining style, citation, and grounding rules.
+            str: Complete system prompt string.
         """
         base_prompt = """You are an AI assistant for YottaReal property management software, helping leasing agents, property managers, and district managers retrieve information.
 
@@ -150,10 +199,23 @@ SOURCE ATTRIBUTION:
 
     def _build_prompt(self, query: str, context: List[Dict], has_uploads: bool = False) -> tuple:
         """
-        Build user-facing prompt and document mapping for citation renumbering.
+        Build the user-facing prompt and document mapping for citation renumbering.
+
+        Separates context into uploaded and company document sections, assigns
+        sequential document numbers, and tracks page numbers per document for
+        later citation renumbering. Company document content is capped at 10,000
+        characters to stay within token limits.
+
+        Args:
+            query: The user's question text.
+            context: List of document chunk dicts with keys: content, filename,
+                     source_type, page_number, download_url.
+            has_uploads: True when uploaded documents are present (affects section headers).
 
         Returns:
-            tuple[str, dict]: Full prompt text and internal document map.
+            tuple[str, dict]: The full prompt string and a doc_mapping dict keyed
+                              by document number with filename, type, download_url,
+                              and pages metadata.
         """
         uploaded_docs = [doc for doc in context if doc.get("source_type") == "uploaded"]
         company_docs = [doc for doc in context if doc.get("source_type") == "company"]
@@ -181,7 +243,7 @@ SOURCE ATTRIBUTION:
 
         if company_docs:
             if uploaded_docs:
-                context_text += "\n" + "="*60 + "\n\n"
+                context_text += "\n" + "=" * 60 + "\n\n"
             context_text += "=== COMPANY DOCUMENTS (Policies, Handbooks, Procedures) ===\n"
             for doc in company_docs:
                 page_num = doc.get('page_number', 1)
@@ -211,16 +273,27 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
 
         return prompt, doc_mapping
 
+    # ── Citation post-processing ──────────────────────────────────────────────────
+
     def _extract_citations_and_renumber(self, response_text: str, doc_mapping: Dict) -> tuple:
         """
         Normalize citation numbering in the model response and build source metadata.
 
+        After the model generates a response, document numbers may not start from 1
+        or may reference the same filename multiple times. This method:
+        1. Normalizes any placeholder [N → Page X] template citations
+        2. Expands grouped citations like [1; 2; 3] into individual brackets
+        3. Deduplicates citations by filename
+        4. Renumbers citations sequentially starting from 1
+        5. Builds the final sources list with icons and download URLs
+
         Args:
-            response_text: Raw model response containing citations.
-            doc_mapping: Mapping of original context doc numbers to metadata.
+            response_text: Raw model response text containing citation markers.
+            doc_mapping: Document number → metadata mapping from _build_prompt.
 
         Returns:
-            tuple[str, list]: Updated response text and normalized source list.
+            tuple[str, list]: Updated response text with renumbered citations,
+                              and a list of unique source dicts for the UI.
         """
         response_text = self._normalize_placeholder_citations(response_text, doc_mapping)
         response_text = self._expand_grouped_citations(response_text)
@@ -260,7 +333,7 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
                 renumber_map[old_num] = info["new_num"]
 
         def replace_citation(match):
-            """Map old citation ids to deduplicated citation ids while preserving page refs."""
+            """Map old citation numbers to deduplicated numbers, preserving page refs."""
             old_num = int(match.group(1))
             page_num = match.group(2)
             if old_num in renumber_map:
@@ -286,7 +359,20 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         return updated_text, sources
 
     def _normalize_placeholder_citations(self, response_text: str, doc_mapping: Dict) -> str:
-        """Replace template citations like [N → Page X] with concrete numeric citations."""
+        """
+        Replace literal template citations [N → Page X] with concrete numeric citations.
+
+        The model occasionally echoes the example citation format from the system
+        prompt verbatim (using the literal letter N or X). This method replaces
+        those placeholders with the actual first uploaded document number and page.
+
+        Args:
+            response_text: Model response possibly containing [N → Page X] literals.
+            doc_mapping: Document number → metadata mapping.
+
+        Returns:
+            str: Response text with placeholder citations replaced by real ones.
+        """
         if not doc_mapping:
             return response_text
 
@@ -312,7 +398,18 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         return re.sub(template_pattern, replace_template, response_text)
 
     def _expand_grouped_citations(self, response_text: str) -> str:
-        """Expand grouped citation blocks into individual bracketed citations."""
+        """
+        Expand grouped citation blocks into individual bracketed citations.
+
+        Handles cases where the model groups multiple citations in one block,
+        e.g. [1 → Page 51; 2 → Page 1; 3 → Page 4] → [1 → Page 51] [2 → Page 1] [3 → Page 4].
+
+        Args:
+            response_text: Model response possibly containing grouped citations.
+
+        Returns:
+            str: Response text with all grouped citations expanded.
+        """
         grouped_pattern = r'\[((?:\s*\d+\s*(?:→\s*Page\s*\d+)?\s*[;,]\s*)+\s*\d+\s*(?:→\s*Page\s*\d+)?\s*)\]'
 
         def replace_group(match):
@@ -322,7 +419,18 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         return re.sub(grouped_pattern, replace_group, response_text)
 
     def _clean_response(self, response_text: str) -> str:
-        """Remove undesired markdown formatting and trim response text."""
+        """
+        Remove undesired markdown formatting and trim response text.
+
+        Strips any ** bold markers the model may produce despite the system
+        prompt instructing otherwise, then trims surrounding whitespace.
+
+        Args:
+            response_text: Raw model output string.
+
+        Returns:
+            str: Cleaned response text.
+        """
         cleaned = re.sub(r'\*\*', '', response_text)
         return cleaned.strip()
 
@@ -334,31 +442,36 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         stop=stop_after_attempt(3)
     )
     def _call_openai_sync(self, messages: list) -> str:
-        """Execute synchronous chat completion call with retry-enabled wrapper."""
+        """
+        Execute a synchronous Azure OpenAI chat completion with retry support.
+
+        Uses max_completion_tokens (required by GPT-5.4) instead of the legacy
+        max_tokens parameter. Retries automatically on rate limit or connection
+        errors with exponential backoff up to 3 attempts.
+
+        This method is synchronous and must be called via asyncio.to_thread
+        to avoid blocking the event loop.
+
+        Args:
+            messages: Full message list in OpenAI chat format, including system
+                      prompt, conversation history, and the current user message.
+
+        Returns:
+            str: The assistant's response content string.
+
+        Raises:
+            RateLimitError: If all retry attempts are exhausted due to rate limiting.
+            APIConnectionError: If all retry attempts fail due to connectivity issues.
+        """
         request_kwargs = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0.2,
+            "temperature": 0.3,
             "timeout": config.REQUEST_TIMEOUT_SECONDS,
-            "max_tokens": 1500,
+            "max_completion_tokens": 2000,
         }
 
-        try:
-            response = self.client.chat.completions.create(**request_kwargs)
-        except BadRequestError as e:
-            # Some deployments (for example newer GPT-5 style deployments)
-            # require max_completion_tokens instead of max_tokens.
-            error_text = str(e)
-            if "max_completion_tokens" in error_text and "max_tokens" in request_kwargs:
-                self.logger.info(
-                    "Retrying chat completion with max_completion_tokens for deployment %s",
-                    self.model,
-                )
-                request_kwargs["max_completion_tokens"] = request_kwargs.pop("max_tokens")
-                response = self.client.chat.completions.create(**request_kwargs)
-            else:
-                raise
-
+        response = self.client.chat.completions.create(**request_kwargs)
         return response.choices[0].message.content
 
     async def _generate_azure_openai(
@@ -368,10 +481,19 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         history: list
     ) -> str:
         """
-        Build message sequence and execute Azure OpenAI chat completion.
+        Build the full message sequence and execute the Azure OpenAI chat completion.
+
+        Assembles the messages list from the system prompt, prior conversation
+        history turns, and the current user prompt, then dispatches the blocking
+        API call to a thread pool to keep the event loop free.
+
+        Args:
+            system_prompt: System instruction string from _build_system_prompt.
+            user_prompt: User-facing prompt string from _build_prompt.
+            history: Sanitized conversation history list of {"query", "response"} dicts.
 
         Returns:
-            str: Assistant response content.
+            str: Raw assistant response content from Azure OpenAI.
         """
         messages = [{"role": "system", "content": system_prompt}]
 
@@ -383,7 +505,6 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
 
         self.logger.info("Including %s previous exchanges in context", len(history))
 
-        # Run sync OpenAI call off the event loop
         return await asyncio.to_thread(self._call_openai_sync, messages)
 
     # ── Main entry point ──────────────────────────────────────────────────────────
@@ -399,16 +520,32 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
         """
         Generate a citation-aware answer for a user query.
 
-        This method orchestrates history loading, prompt construction, model
-        inference, citation normalization, and history persistence.
+        Orchestrates the full response pipeline:
+        1. Load conversation history from Redis
+        2. Build system and user prompts with document context
+        3. Log prompt size statistics for monitoring
+        4. Call Azure OpenAI and handle errors gracefully
+        5. Clean and post-process citations in the response
+        6. Persist updated history back to Redis
+        7. Return structured response payload
+
+        Args:
+            query: The user's question text.
+            context: Retrieved document chunks from search and/or session uploads.
+            session_id: Optional existing session ID. A new UUID is generated if absent.
+            has_uploads: True when user-uploaded documents are present in context.
+            is_comparison: Reserved for future comparison-mode prompt branching.
 
         Returns:
-            Dict: Response payload containing `answer`, `sources`, and `session_id`.
+            Dict: Payload with keys:
+                - "answer" (str): Citation-annotated response text.
+                - "sources" (list): Deduplicated source list with filename, type,
+                  download_url, and citation_number.
+                - "session_id" (str): The active session identifier.
         """
         if not session_id:
             session_id = str(uuid.uuid4())
 
-        # Load history from Redis
         history = await self._load_history(session_id)
 
         system_prompt = self._build_system_prompt(has_uploads)
@@ -439,9 +576,8 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
                 len(sources),
             )
             if not sources:
-                self.logger.warning("No documents cited")
+                self.logger.warning("No documents cited in response")
 
-            # Save updated history to Redis (auto-truncates to MAX_CONVERSATION_TURNS)
             history.append({"query": query, "response": updated_response})
             await self._save_history(session_id, history)
 
