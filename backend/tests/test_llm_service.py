@@ -1,4 +1,6 @@
 from services.llm_service import LLMService
+from openai import BadRequestError
+import httpx
 
 
 def test_extract_citations_deduplicates_same_filename():
@@ -84,3 +86,64 @@ def test_extract_citations_expands_grouped_citation_blocks():
     assert "[2 → Page 1]" in updated_text
     assert "[3 → Page 4]" in updated_text
     assert len(sources) == 3
+
+
+def test_call_openai_sync_falls_back_to_max_completion_tokens():
+    service = LLMService.__new__(LLMService)
+    service.model = "chatbot-gpt-5.4"
+
+    class _Message:
+        def __init__(self, content):
+            self.content = content
+
+    class _Choice:
+        def __init__(self, content):
+            self.message = _Message(content)
+
+    class _Response:
+        def __init__(self, content):
+            self.choices = [_Choice(content)]
+
+    class _Completions:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if "max_tokens" in kwargs:
+                request = httpx.Request("POST", "https://example.test/openai/chat/completions")
+                response = httpx.Response(status_code=400, request=request)
+                raise BadRequestError(
+                    message="Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+                    response=response,
+                    body={
+                        "error": {
+                            "message": "Unsupported parameter",
+                            "param": "max_tokens",
+                            "code": "unsupported_parameter",
+                        }
+                    },
+                )
+            return _Response("ok")
+
+    class _Chat:
+        def __init__(self):
+            self.completions = _Completions()
+
+    class _Client:
+        def __init__(self):
+            self.chat = _Chat()
+
+    class _Logger:
+        def info(self, *_args, **_kwargs):
+            return None
+
+    service.client = _Client()
+    service.logger = _Logger()
+
+    result = service._call_openai_sync([{"role": "user", "content": "hi"}])
+
+    assert result == "ok"
+    assert len(service.client.chat.completions.calls) == 2
+    assert "max_tokens" in service.client.chat.completions.calls[0]
+    assert "max_completion_tokens" in service.client.chat.completions.calls[1]

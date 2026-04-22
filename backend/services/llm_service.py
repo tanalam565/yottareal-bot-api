@@ -6,7 +6,7 @@ history, and returns citation-aware answers from Azure OpenAI.
 """
 
 from typing import List, Dict, Optional
-from openai import AzureOpenAI, RateLimitError, APIConnectionError
+from openai import AzureOpenAI, RateLimitError, APIConnectionError, BadRequestError
 import uuid
 import re
 import json
@@ -335,13 +335,30 @@ Answer (use bullet points on separate lines with [N → Page X] citations):"""
     )
     def _call_openai_sync(self, messages: list) -> str:
         """Execute synchronous chat completion call with retry-enabled wrapper."""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=2500,
-            timeout=config.REQUEST_TIMEOUT_SECONDS
-        )
+        request_kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "timeout": config.REQUEST_TIMEOUT_SECONDS,
+            "max_tokens": 1500,
+        }
+
+        try:
+            response = self.client.chat.completions.create(**request_kwargs)
+        except BadRequestError as e:
+            # Some deployments (for example newer GPT-5 style deployments)
+            # require max_completion_tokens instead of max_tokens.
+            error_text = str(e)
+            if "max_completion_tokens" in error_text and "max_tokens" in request_kwargs:
+                self.logger.info(
+                    "Retrying chat completion with max_completion_tokens for deployment %s",
+                    self.model,
+                )
+                request_kwargs["max_completion_tokens"] = request_kwargs.pop("max_tokens")
+                response = self.client.chat.completions.create(**request_kwargs)
+            else:
+                raise
+
         return response.choices[0].message.content
 
     async def _generate_azure_openai(
