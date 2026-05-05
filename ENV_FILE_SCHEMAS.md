@@ -14,6 +14,9 @@ AZURE_SEARCH_INDEX_NAME=
 AZURE_SEARCH_DATASOURCE_NAME=
 AZURE_SEARCH_INDEXER_NAME
 
+# Redis
+REDIS_URL=rediss://default:your-redis-access-key@your-cache-name.redis.cache.windows.net:6380/0
+
 # Azure OpenAI
 AZURE_OPENAI_API_KEY=
 AZURE_OPENAI_ENDPOINT=
