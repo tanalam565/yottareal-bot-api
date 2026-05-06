@@ -8,6 +8,7 @@ can provide secure, time-limited document access.
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from azure.core.exceptions import ResourceExistsError
 from datetime import datetime, timedelta
+from typing import Optional
 import urllib.parse
 import os
 import uuid
@@ -26,12 +27,12 @@ class BlobService:
         self.uploads_container_name = config.AZURE_UPLOADS_CONTAINER_NAME
         self.logger = logging.getLogger(__name__)
 
-    def upload_user_file(self, file_content: bytes, session_id: str, filename: str) -> dict | None:
+    def upload_user_file(self, file_content: bytes, session_id: str, filename: str) -> Optional[dict]:
         """
         Upload a user-provided file to the dedicated uploads container.
 
         Returns:
-            dict | None: Uploaded blob metadata (container/name/url), or None on error.
+            Optional[dict]: Uploaded blob metadata (container/name/url), or None on error.
         """
         try:
             container_client = self.blob_service_client.get_container_client(self.uploads_container_name)
@@ -63,7 +64,7 @@ class BlobService:
             expiry_hours: SAS token validity duration in hours.
 
         Returns:
-            str | None: Download URL if generated successfully, otherwise None.
+            Optional[str]: Download URL if generated successfully, otherwise None.
         """
         try:
             # URL decode the blob name first (Azure stores with + as space)
